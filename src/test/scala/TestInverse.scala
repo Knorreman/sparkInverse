@@ -18,6 +18,7 @@ class TestInverse extends AnyFunSuite {
 
   test("inverse"){
     val sc = new SparkContext(new SparkConf().setMaster("local").setAppName("Testing"))
+    sc.setLogLevel("ERROR")
     val blocks = Seq(
       ((0, 0), new DenseMatrix(2, 2, Array(1.0, 2.0, 1.0, 4.0))),
       ((0, 1), new DenseMatrix(2, 2, Array(4.0, 3.0, 2.0, 2.0))),
