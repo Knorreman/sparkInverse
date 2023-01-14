@@ -6,7 +6,8 @@ import org.apache.spark.{SparkConf, SparkContext}
 import breeze.linalg.{DenseMatrix => BDM, inv => BINV}
 
 class TestInverse extends AnyFunSuite {
-
+  val sc = setup()
+  val numPartitions = 3
   def breezeToDenseMatrix(dm: BDM[Double]): DenseMatrix = {
     new DenseMatrix(dm.rows, dm.cols, dm.data, dm.isTranspose)
   }
@@ -15,17 +16,21 @@ class TestInverse extends AnyFunSuite {
     val localMat = mat.toLocalMatrix()
     new BDM[Double](localMat.numRows, localMat.numCols, localMat.toArray)
   }
+  def setup(): SparkContext = {
 
-  test("inverse"){
     val sc = new SparkContext(new SparkConf().setMaster("local").setAppName("Testing"))
     sc.setLogLevel("ERROR")
+    sc
+  }
+
+  test("inverse"){
+//    val sc = setup()
     val blocks = Seq(
       ((0, 0), new DenseMatrix(2, 2, Array(1.0, 2.0, 1.0, 4.0))),
       ((0, 1), new DenseMatrix(2, 2, Array(4.0, 3.0, 2.0, 2.0))),
       ((1, 0), new DenseMatrix(2, 2, Array(1.0, 5.0, 3.0, 4.0))),
       ((1, 1), new DenseMatrix(2, 2, Array(-1.0, 6.0, 2.0, 1.0)))
     )
-    val numPartitions = 3
     val sq_mat = new BlockMatrix(sc.parallelize(blocks, numPartitions), 2, 2)
 
     val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(sq_mat)))
@@ -43,4 +48,20 @@ class TestInverse extends AnyFunSuite {
     A.toArray.zip(B.values).forall {case (a, b) => math.abs(a - b) < tol}
   }
 
+  test("SVD Inverse") {
+    val blocks = Seq(
+      ((0, 0), new DenseMatrix(2, 2, Array(1.0, 2.0, 1.0, 4.0))),
+      ((0, 1), new DenseMatrix(2, 2, Array(4.0, 3.0, 2.0, 1.0))),
+      ((1, 0), new DenseMatrix(2, 2, Array(1.0, 5.0, 3.0, 4.0))),
+      ((1, 1), new DenseMatrix(2, 2, Array(-1.0, 6.0, 2.0, 1.0)))
+    )
+    val sq_mat = new BlockMatrix(sc.parallelize(blocks, numPartitions), 2, 2)
+    val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(sq_mat)))
+    val bm_inv = sq_mat.svdInv()
+
+    assert(bm_inv.numRows() === sq_mat.numRows())
+    assert(bm_inv.numCols() === sq_mat.numCols())
+    assert(testMatrixSimilarity(bm_inv.toLocalMatrix(), expected, 1e-12))
+
+  }
 }
