@@ -115,23 +115,13 @@ object Inverse {
     }
 
     /**
-     * Creates identity matrix of size n.
-     *
-     * @param n     Matrix size
-     * @return Diagonal BlockMatrix
-     */
-    def createEye(n: Long): BlockMatrix = {
-      createEye(n, 1.0)
-    }
-
-    /**
      * Creates identity matrix of size n and value in the diagonal
      *
      * @param n     Matrix size
      * @param value Value of the diagonal
      * @return Diagonal BlockMatrix
      */
-    def createEye(n: Long, value: Double = 1.0): BlockMatrix = {
+    private def createEye(n: Long, value: Double = 1.0): BlockMatrix = {
       val sc = matrix.blocks.sparkContext
       val diagonal = sc.range(start = 0, end = n)
         .map {
