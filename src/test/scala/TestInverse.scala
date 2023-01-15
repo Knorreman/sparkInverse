@@ -18,7 +18,7 @@ class TestInverse extends AnyFunSuite {
   }
   def setup(): SparkContext = {
 
-    val sc = new SparkContext(new SparkConf().setMaster("local").setAppName("Testing"))
+    val sc = new SparkContext(new SparkConf().setMaster("local[*]").setAppName("Testing"))
     sc.setLogLevel("ERROR")
     sc
   }
