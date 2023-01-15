@@ -3,11 +3,17 @@ import org.apache.spark.mllib.linalg.distributed.BlockMatrix
 import org.scalatest.funsuite.AnyFunSuite
 import Inverse.BlockMatrixInverse
 import org.apache.spark.{SparkConf, SparkContext}
-import breeze.linalg.{DenseMatrix => BDM, inv => BINV}
+import breeze.linalg.{DenseMatrix => BDM, inv => BINV, pinv => PBINV}
 
 class TestInverse extends AnyFunSuite {
   val sc = setup()
   val numPartitions = 3
+
+  def setup(): SparkContext = {
+    val sc = new SparkContext(new SparkConf().setMaster("local[*]").setAppName("Testing"))
+    sc.setLogLevel("ERROR")
+    sc
+  }
   def breezeToDenseMatrix(dm: BDM[Double]): DenseMatrix = {
     new DenseMatrix(dm.rows, dm.cols, dm.data, dm.isTranspose)
   }
@@ -16,14 +22,8 @@ class TestInverse extends AnyFunSuite {
     val localMat = mat.toLocalMatrix()
     new BDM[Double](localMat.numRows, localMat.numCols, localMat.toArray)
   }
-  def setup(): SparkContext = {
-    val sc = new SparkContext(new SparkConf().setMaster("local[*]").setAppName("Testing"))
-    sc.setLogLevel("ERROR")
-    sc
-  }
 
   test("inverse"){
-//    val sc = setup()
     val blocks = Seq(
       ((0, 0), new DenseMatrix(2, 2, Array(1.0, 2.0, 1.0, 4.0))),
       ((0, 1), new DenseMatrix(2, 2, Array(4.0, 3.0, 2.0, 2.0))),
@@ -44,7 +44,7 @@ class TestInverse extends AnyFunSuite {
     assert(testMatrixSimilarity(bm_inv2.toLocalMatrix(), expected, 1e-12))
   }
   def testMatrixSimilarity(A: Matrix, B: DenseMatrix, tol: Double): Boolean = {
-    A.toArray.zip(B.values).forall {case (a, b) => math.abs(a - b) < tol}
+    A.toArray.zip(B.toArray).forall {case (a, b) => math.abs(a - b) < tol}
   }
 
   test("SVD Inverse") {
@@ -62,5 +62,27 @@ class TestInverse extends AnyFunSuite {
     assert(bm_inv.numCols() === sq_mat.numCols())
     assert(testMatrixSimilarity(bm_inv.toLocalMatrix(), expected, 1e-12))
 
+  }
+  test("pseudoInverse") {
+    val blocks = Seq(
+      ((0, 0), new DenseMatrix(2, 3, Array(1.0, 2.0, 2.0, 4.0, 3, 2))),
+      ((0, 1), new DenseMatrix(2, 3, Array(4.0, 3.0, 2.0, 2.0, 1, 4))),
+      ((1, 1), new DenseMatrix(2, 3, Array(1.0, 5.0, 3.0, 4.0, 2, 1))),
+      ((1, 0), new DenseMatrix(2, 3, Array(-1.0, 0.0, 2.0, 1.0, 3, 4)))
+    )
+    val sq_mat = new BlockMatrix(sc.parallelize(blocks, numPartitions), 2, 3)
+
+    val expected = breezeToDenseMatrix(PBINV(denseMatrixToBreeze(sq_mat)))
+    val bm_inv = sq_mat.pseudoInverse(3, 2)
+
+    assert(bm_inv.numRows() === sq_mat.numCols())
+    assert(bm_inv.numCols() === sq_mat.numRows())
+    assert(testMatrixSimilarity(bm_inv.toLocalMatrix(), expected, 1e-12))
+
+    // Test with default arguments
+    val bm_inv2 = sq_mat.pseudoInverse()
+    assert(bm_inv2.numRows() === sq_mat.numCols())
+    assert(bm_inv2.numCols() === sq_mat.numRows())
+    assert(testMatrixSimilarity(bm_inv2.toLocalMatrix(), expected, 1e-12))
   }
 }
