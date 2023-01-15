@@ -19,7 +19,7 @@ object Inverse {
 
       val n = X.numCols().toInt
       val svd = X.computeSVD(n, computeU = true)
-      require(svd.s.size >= n, "svdInv called on singular matrix.")
+      require(svd.s.size >= n, "svdInv called on singular matrix." + X.rows.collect().mkString("Array(", ", ", ")") + svd.s.toArray.mkString("Array(", ", ", ")"))
 
       // Create the inv diagonal matrix from S
       val invS = DenseMatrix.diag(new DenseVector(svd.s.toArray.map(x => math.pow(x, -1))))
@@ -104,7 +104,6 @@ object Inverse {
         case ((i, j), mat) => ((i + m, j + m), mat)
       }
       val sc = top_left.sparkContext
-      println(blocks.getNumPartitions)
       val all_blocks = sc.union(top_left, top_right, bottom_left, bottom_right).repartition(blocks.getNumPartitions)
       new BlockMatrix(all_blocks, rowsPerBlock, colsPerBlock, matrix.numRows(), matrix.numCols())
     }
@@ -135,6 +134,21 @@ object Inverse {
       val cm = new CoordinateMatrix(diagonal, n, n)
       cm.toBlockMatrix(matrix.rowsPerBlock, matrix.colsPerBlock)
     }
+
+    def pseudoInverse(limit: Int, numMidDimSplits: Int): BlockMatrix = {
+//      matrix.transpose.multiply(matrix.multiply(matrix.transpose).inverse(limit, numMidDimSplits))
+      matrix.transpose.multiply(matrix.multiply(matrix.transpose).inverse(limit, numMidDimSplits))
+    }
+
+    def pseudoInverse(limit: Int): BlockMatrix = {
+      pseudoInverse(limit, 1)
+    }
+
+    def pseudoInverse(): BlockMatrix = {
+//      matrix.transpose.multiply(matrix.multiply(matrix.transpose).inverse())
+      matrix.transpose.multiply(matrix.multiply(matrix.transpose).inverse())
+    }
+
   }
 
 }
