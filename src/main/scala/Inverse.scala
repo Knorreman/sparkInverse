@@ -64,15 +64,14 @@ object Inverse {
       val m = math.ceil(matrix.numCols() / colsPerBlock / 2).toInt
       val blocks = matrix.blocks
 
-      // split into block partitions
-      val subBlockPartitions = (blocks.getNumPartitions/2).toInt
-      val E = new BlockMatrix(blocks.filter(x => x._1._1 < m & x._1._2 < m).repartition(subBlockPartitions), rowsPerBlock, colsPerBlock)
+      // split into block partitions and readjust the block indices
+      val E = new BlockMatrix(blocks.filter(x => x._1._1 < m & x._1._2 < m), rowsPerBlock, colsPerBlock)
       val F = new BlockMatrix(blocks.filter(x => x._1._1 < m & x._1._2 >= m)
-        .map { case ((i, j), matrix) => ((i, j - m), matrix) }.repartition(subBlockPartitions), rowsPerBlock, colsPerBlock)
+        .map { case ((i, j), matrix) => ((i, j - m), matrix) }, rowsPerBlock, colsPerBlock)
       val G = new BlockMatrix(blocks.filter(x => x._1._1 >= m & x._1._2 < m)
-        .map { case ((i, j), matrix) => ((i - m, j), matrix) }.repartition(subBlockPartitions), rowsPerBlock, colsPerBlock)
+        .map { case ((i, j), matrix) => ((i - m, j), matrix) }, rowsPerBlock, colsPerBlock)
       val H = new BlockMatrix(blocks.filter(x => x._1._1 >= m & x._1._2 >= m)
-        .map { case ((i, j), matrix) => ((i - m, j - m), matrix) }.repartition(subBlockPartitions), rowsPerBlock, colsPerBlock)
+        .map { case ((i, j), matrix) => ((i - m, j - m), matrix) }, rowsPerBlock, colsPerBlock)
 
       val E_inv = if (m > (limit / colsPerBlock)) {
         E.inverse(limit, numMidDimSplits)
@@ -94,6 +93,7 @@ object Inverse {
       val mE_invFS_inv = mE_invF.multiply(S_inv, numMidDimSplits)
 
       val top_left = E_inv.subtract(mE_invFS_inv.multiply(GE_inv, numMidDimSplits)).blocks
+      // Readjust the block indices
       val top_right = mE_invFS_inv.blocks.map {
         case ((i, j), mat) => ((i, j + m), mat)
       }
@@ -104,12 +104,13 @@ object Inverse {
         case ((i, j), mat) => ((i + m, j + m), mat)
       }
       val sc = top_left.sparkContext
-      val all_blocks = sc.union(top_left, top_right, bottom_left, bottom_right)
+      println(blocks.getNumPartitions)
+      val all_blocks = sc.union(top_left, top_right, bottom_left, bottom_right).repartition(blocks.getNumPartitions)
       new BlockMatrix(all_blocks, rowsPerBlock, colsPerBlock, matrix.numRows(), matrix.numCols())
     }
 
     def inverse(): BlockMatrix = {
-      inverse(128, 1)
+      inverse(1024, 1)
     }
 
     def inverse(limit: Int): BlockMatrix = {
