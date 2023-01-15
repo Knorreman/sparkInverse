@@ -28,7 +28,7 @@ object Inverse {
 
       U.multiply(invS)
         .multiply(V.transpose)
-        .toBlockMatrix(colsPerBlock = colsPerBlock, rowsPerBlock = rowsPerBlock)
+        .toBlockMatrix(colsPerBlock, rowsPerBlock)
         .transpose
     }
 
@@ -58,21 +58,23 @@ object Inverse {
      */
     def inverse(limit: Int, numMidDimSplits: Int): BlockMatrix = {
       require(matrix.numRows() == matrix.numCols(), "Matrix has to be square!")
-      // require(colsPerBlock == rowsPerBlock, "Sub-matrices has to be square!")
       val colsPerBlock = matrix.colsPerBlock
       val rowsPerBlock = matrix.rowsPerBlock
-      val m = math.ceil(matrix.numCols() / matrix.colsPerBlock / 2).toInt
+      require(colsPerBlock == rowsPerBlock, "Sub-matrices has to be square!")
+      val m = math.ceil(matrix.numCols() / colsPerBlock / 2).toInt
       val blocks = matrix.blocks
-      // split into block partitions
-      val E = new BlockMatrix(blocks.filter(x => x._1._1 < m & x._1._2 < m), rowsPerBlock, colsPerBlock)
-      val F = new BlockMatrix(blocks.filter(x => x._1._1 < m & x._1._2 >= m)
-        .map { case ((i, j), matrix) => ((i, j - m), matrix) }, rowsPerBlock, colsPerBlock)
-      val G = new BlockMatrix(blocks.filter(x => x._1._1 >= m & x._1._2 < m)
-        .map { case ((i, j), matrix) => ((i - m, j), matrix) }, rowsPerBlock, colsPerBlock)
-      val H = new BlockMatrix(blocks.filter(x => x._1._1 >= m & x._1._2 >= m)
-        .map { case ((i, j), matrix) => ((i - m, j - m), matrix) }, rowsPerBlock, colsPerBlock)
 
-      val E_inv = if (m > (limit / matrix.colsPerBlock)) {
+      // split into block partitions
+      val subBlockPartitions = (blocks.getNumPartitions/2).toInt
+      val E = new BlockMatrix(blocks.filter(x => x._1._1 < m & x._1._2 < m).repartition(subBlockPartitions), rowsPerBlock, colsPerBlock)
+      val F = new BlockMatrix(blocks.filter(x => x._1._1 < m & x._1._2 >= m)
+        .map { case ((i, j), matrix) => ((i, j - m), matrix) }.repartition(subBlockPartitions), rowsPerBlock, colsPerBlock)
+      val G = new BlockMatrix(blocks.filter(x => x._1._1 >= m & x._1._2 < m)
+        .map { case ((i, j), matrix) => ((i - m, j), matrix) }.repartition(subBlockPartitions), rowsPerBlock, colsPerBlock)
+      val H = new BlockMatrix(blocks.filter(x => x._1._1 >= m & x._1._2 >= m)
+        .map { case ((i, j), matrix) => ((i - m, j - m), matrix) }.repartition(subBlockPartitions), rowsPerBlock, colsPerBlock)
+
+      val E_inv = if (m > (limit / colsPerBlock)) {
         E.inverse(limit, numMidDimSplits)
       } else {
         E.svdInv()
@@ -81,7 +83,7 @@ object Inverse {
       val mE_invF = E_inv.negative().multiply(F, numMidDimSplits)
       val S = H.add(G.multiply(mE_invF, numMidDimSplits))
 
-      val S_inv = if (m > (limit / matrix.colsPerBlock)) {
+      val S_inv = if (m > (limit / colsPerBlock)) {
         S.inverse(limit, numMidDimSplits)
       } else {
         S.svdInv()
@@ -107,7 +109,7 @@ object Inverse {
     }
 
     def inverse(): BlockMatrix = {
-      inverse(2048, 1)
+      inverse(128, 1)
     }
 
     def inverse(limit: Int): BlockMatrix = {
