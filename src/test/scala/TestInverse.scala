@@ -17,7 +17,6 @@ class TestInverse extends AnyFunSuite {
     new BDM[Double](localMat.numRows, localMat.numCols, localMat.toArray)
   }
   def setup(): SparkContext = {
-
     val sc = new SparkContext(new SparkConf().setMaster("local[*]").setAppName("Testing"))
     sc.setLogLevel("ERROR")
     sc
