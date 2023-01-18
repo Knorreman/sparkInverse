@@ -1,6 +1,6 @@
 # sparkInverse - Apache Spark implementation of matrix inversion 
 ## Implementation through block inversion https://en.wikipedia.org/wiki/Invertible_matrix#Blockwise_inversion
-
+The implementation is recursive for the inverse submatrices 
 # Usage
 ```scala
 import org.apache.spark.mllib.linalg.distributed.BlockMatrix
@@ -12,7 +12,7 @@ val matrix_inverted = matrix.inverse()
 
 // Invert a non squared matrix
 val not_square_matrix: BlockMatrix = ...
-val matrix_pseudo_inverse = matrix.pseudoInverse()
+val matrix_pseudo_inverse = not_square_matrix.pseudoInverse()
 ```
 
 # Notes
