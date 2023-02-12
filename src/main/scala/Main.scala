@@ -2,10 +2,7 @@ import org.apache.spark.mllib.linalg.distributed.{CoordinateMatrix, IndexedRow, 
 import org.apache.spark.mllib.random.RandomRDDs
 import org.apache.spark.{SparkConf, SparkContext}
 import Inverse.BlockMatrixInverse
-import org.apache.spark.mllib.linalg.Matrix
-import org.apache.spark.storage.StorageLevel
-
-import java.lang
+import org.apache.spark.mllib.linalg.{DenseMatrix, Matrix}
 
 object Main {
   def main(args: Array[String]): Unit = {
@@ -14,25 +11,24 @@ object Main {
       .set("spark.driver.memory", "64g")
       .set("spark.executor.memory", "64g")
       .set("spark.cleaner.referenceTracking.cleanCheckpoints", "true")
-      .registerKryoClasses(Array(classOf[IndexedRow], classOf[MatrixEntry], classOf[Matrix]))
+      .set("spark.kryoserializer.buffer.max", "2047m")
+      .registerKryoClasses(Array(classOf[IndexedRow], classOf[MatrixEntry], classOf[Matrix], classOf[DenseMatrix]))
       .setAppName("Main"))
 
     sc.setLogLevel("ERROR")
     sc.setCheckpointDir("D:\\spark_checkpoints")
 
-    val n = 3720 // math.pow(2, 11).intValue - 1
-    val lnrdd = RandomRDDs.normalVectorRDD(sc, n, n, seed = 42, numPartitions = 16)
+    val n = 5001 // math.pow(2, 11).intValue - 1
+    val lnrdd = RandomRDDs.normalVectorRDD(sc, n, n, seed = 42, numPartitions = 128)
       .zipWithIndex()
       .map(_.swap)
       .map(x => IndexedRow(x._1, x._2))
 
-
-
     val matrix = new IndexedRowMatrix(lnrdd)
-      .toBlockMatrix(512, 512)
+      .toBlockMatrix(256, 256)
     println("Matrix shape: " + matrix.numRows() + ", " + matrix.numCols())
     val t = System.nanoTime()
-    val inverted = matrix.inverse(1250, 1)
+    val inverted = matrix.inverse(2048, 1)
       .cache()
 
     val errorSum = matrix.multiply(inverted).toCoordinateMatrix().entries
