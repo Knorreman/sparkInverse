@@ -27,5 +27,14 @@ jobs:
         java-version: '11'
         distribution: 'temurin'
         cache: 'sbt'
-    - name: Run tests
+    - name: Run tests jdk11
+      run: sbt test
+
+    - name: Set up JDK 8
+      uses: actions/setup-java@v3
+      with:
+        java-version: '8'
+        distribution: 'temurin'
+        cache: 'sbt'
+    - name: Runt test jdk8
       run: sbt test
