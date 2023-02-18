@@ -1,14 +1,14 @@
 import org.apache.spark.mllib.linalg.{DenseMatrix, Matrix}
-import org.apache.spark.mllib.linalg.distributed.BlockMatrix
+import org.apache.spark.mllib.linalg.distributed.{BlockMatrix, CoordinateMatrix}
 import org.scalatest.funsuite.AnyFunSuite
-import Inverse.BlockMatrixInverse
+import Inverse.{BlockMatrixInverse, CoordinateMatrixInverse}
 import org.apache.spark.{SparkConf, SparkContext}
 import breeze.linalg.{DenseMatrix => BDM, inv => BINV, pinv => PBINV}
 
 import java.nio.file.Files
 
 class TestInverse extends AnyFunSuite {
-  val sc = setup()
+  val sc: SparkContext = setup()
   val numPartitions = 3
 
   def setup(): SparkContext = {
@@ -25,6 +25,11 @@ class TestInverse extends AnyFunSuite {
 
   def denseMatrixToBreeze(mat: BlockMatrix): BDM[Double] = {
     val localMat = mat.toLocalMatrix()
+    new BDM[Double](localMat.numRows, localMat.numCols, localMat.toArray)
+  }
+
+  def denseMatrixToBreeze(mat: CoordinateMatrix): BDM[Double] = {
+    val localMat = mat.toBlockMatrix().toLocalMatrix()
     new BDM[Double](localMat.numRows, localMat.numCols, localMat.toArray)
   }
 
@@ -48,6 +53,7 @@ class TestInverse extends AnyFunSuite {
     assert(bm_inv2.numCols() === sq_mat.numCols())
     assert(testMatrixSimilarity(bm_inv2.toLocalMatrix(), expected, 1e-12))
   }
+
   test("inverse with checkpoint") {
     val blocks = Seq(
       ((0, 0), new DenseMatrix(2, 2, Array(1.0, 2.0, 1.0, 4.0))),
@@ -82,8 +88,8 @@ class TestInverse extends AnyFunSuite {
     assert(bm_inv.numRows() === sq_mat.numRows())
     assert(bm_inv.numCols() === sq_mat.numCols())
     assert(testMatrixSimilarity(bm_inv.toLocalMatrix(), expected, 1e-12))
-
   }
+
   test("LeftPseudoInverse") {
     val blocks = Seq(
       ((0, 0), new DenseMatrix(2, 3, Array(1.0, 2.0, 2.0, 4.0, 3, 2))),
@@ -106,6 +112,7 @@ class TestInverse extends AnyFunSuite {
     assert(bm_inv2.numCols() === not_sq_mat.numRows())
     assert(testMatrixSimilarity(bm_inv2.toLocalMatrix(), expected, 1e-12))
   }
+
   test("RightPseudoInverse") {
     val blocks = Seq(
       ((0, 0), new DenseMatrix(2, 3, Array(1.0, 2.0, 2.0, 4.0, 3, 2))),
@@ -128,4 +135,21 @@ class TestInverse extends AnyFunSuite {
     assert(bm_inv2.numCols() === not_sq_mat.numRows())
     assert(testMatrixSimilarity(bm_inv2.toLocalMatrix(), expected, 1e-12))
   }
+
+  test("CoordinateMatrix inverse with checkpoint") {
+    val blocks = Seq(
+      ((0, 0), new DenseMatrix(2, 2, Array(1.0, 2.0, 1.0, 4.0))),
+      ((0, 1), new DenseMatrix(2, 2, Array(4.0, 3.0, 2.0, 2.0))),
+      ((1, 0), new DenseMatrix(2, 2, Array(1.0, 5.0, 3.0, 4.0))),
+      ((1, 1), new DenseMatrix(2, 2, Array(-1.0, 6.0, 2.0, 1.0)))
+    )
+    val sq_mat = new BlockMatrix(sc.parallelize(blocks, numPartitions), 2, 2)
+    val coo_mat = sq_mat.toCoordinateMatrix()
+    val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(coo_mat)))
+    val bm_inv = coo_mat.inverse(3)
+    assert(bm_inv.numRows() === coo_mat.numRows())
+    assert(bm_inv.numCols() === coo_mat.numCols())
+    assert(testMatrixSimilarity(bm_inv.toBlockMatrix().toLocalMatrix(), expected, 1e-12))
+  }
+
 }
