@@ -22,8 +22,6 @@ object Main {
     sc.setLogLevel("WARN")
     sc.setCheckpointDir("/mnt/h/spark_checkpoints")
 //      sc.setCheckpointDir("/mnt/d/spark_checkpoints_debian")
-    import dev.ludovic.netlib.NativeBLAS
-    println(NativeBLAS.getInstance())
     val n = 1001 // math.pow(2, 11).intValue - 1
 
 //    val lnrdd = RandomRDDs.exponentialVectorRDD(sc, 0.01, n, n, seed = 42, numPartitions = 8)
