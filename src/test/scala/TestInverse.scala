@@ -136,6 +136,34 @@ class TestInverse extends AnyFunSuite {
     assert(testMatrixSimilarity(bm_inv2.toLocalMatrix(), expected, 1e-12))
   }
 
+  test("CoordinateMatrix add with non-overlapping entries") {
+    import org.apache.spark.mllib.linalg.distributed.MatrixEntry
+    val entries1 = sc.parallelize(Seq(MatrixEntry(0, 0, 1.0), MatrixEntry(1, 1, 2.0)))
+    val entries2 = sc.parallelize(Seq(MatrixEntry(0, 1, 3.0), MatrixEntry(1, 0, 4.0)))
+    val cm1 = new CoordinateMatrix(entries1, 2, 2)
+    val cm2 = new CoordinateMatrix(entries2, 2, 2)
+    val result = cm1.add(cm2).entries.collect().sortBy(e => (e.i, e.j))
+    assert(result.length === 4)
+    assert(result.exists(e => e.i == 0 && e.j == 0 && math.abs(e.value - 1.0) < 1e-12))
+    assert(result.exists(e => e.i == 0 && e.j == 1 && math.abs(e.value - 3.0) < 1e-12))
+    assert(result.exists(e => e.i == 1 && e.j == 0 && math.abs(e.value - 4.0) < 1e-12))
+    assert(result.exists(e => e.i == 1 && e.j == 1 && math.abs(e.value - 2.0) < 1e-12))
+  }
+
+  test("CoordinateMatrix subtract with non-overlapping entries") {
+    import org.apache.spark.mllib.linalg.distributed.MatrixEntry
+    val entries1 = sc.parallelize(Seq(MatrixEntry(0, 0, 5.0), MatrixEntry(1, 1, 6.0)))
+    val entries2 = sc.parallelize(Seq(MatrixEntry(0, 1, 3.0), MatrixEntry(1, 0, 4.0)))
+    val cm1 = new CoordinateMatrix(entries1, 2, 2)
+    val cm2 = new CoordinateMatrix(entries2, 2, 2)
+    val result = cm1.subtract(cm2).entries.collect().sortBy(e => (e.i, e.j))
+    assert(result.length === 4)
+    assert(result.exists(e => e.i == 0 && e.j == 0 && math.abs(e.value - 5.0) < 1e-12))
+    assert(result.exists(e => e.i == 0 && e.j == 1 && math.abs(e.value - (-3.0)) < 1e-12))
+    assert(result.exists(e => e.i == 1 && e.j == 0 && math.abs(e.value - (-4.0)) < 1e-12))
+    assert(result.exists(e => e.i == 1 && e.j == 1 && math.abs(e.value - 6.0) < 1e-12))
+  }
+
   test("CoordinateMatrix inverse with checkpoint") {
     val blocks = Seq(
       ((0, 0), new DenseMatrix(2, 2, Array(1.0, 2.0, 1.0, 4.0))),

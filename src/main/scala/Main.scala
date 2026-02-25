@@ -9,28 +9,16 @@ object Main {
   def main(args: Array[String]): Unit = {
     val sc = new SparkContext(new SparkConf()
       .setMaster("local[*]")
-      .set("spark.driver.memory", "64g")
+      .set("spark.driver.memory", "48g")
       .set("spark.cleaner.referenceTracking.cleanCheckpoints", "true")
-      .set("spark.kryoserializer.buffer.max", "2047m")
-      .set("spark.local.dir", "/mnt/h/spark_tmp")
-//      .set("spark.local.dir", "/mnt/d/spark_tmp_debian/,/mnt/c/spark_tmp_debian/")
-//      .set("spark.io.compression.lz4.blockSize", "128k")
-//      .set("spark.shuffle.file.buffer", "2MB")
-      .registerKryoClasses(Array(classOf[IndexedRow], classOf[MatrixEntry], classOf[Matrix], classOf[DenseMatrix]))
+      .set("spark.local.dir", "/tmp/spark_tmp")
       .setAppName("Main"))
 
     sc.setLogLevel("WARN")
-    sc.setCheckpointDir("/mnt/h/spark_checkpoints")
-//      sc.setCheckpointDir("/mnt/d/spark_checkpoints_debian")
-    val n = 1001 // math.pow(2, 11).intValue - 1
+    sc.setCheckpointDir("/tmp/spark_checkpoints")
+    val n = 2001
 
-//    val lnrdd = RandomRDDs.exponentialVectorRDD(sc, 0.01, n, n, seed = 42, numPartitions = 8)
-//      .zipWithIndex()
-//      .map(_.swap)
-//      .map(x => IndexedRow(x._1, x._2))
-//      .persist(StorageLevel.MEMORY_AND_DISK_SER)
-
-    val lnrdd = RandomRDDs.poissonVectorRDD(sc, 0.01, n, n, seed = 42, numPartitions = 4)
+    val lnrdd = RandomRDDs.poissonVectorRDD(sc, 0.01, n, n, seed = 42, numPartitions = 8)
       .zipWithIndex()
       .map(_.swap)
       .map(x => IndexedRow(x._1, x._2))
@@ -39,14 +27,16 @@ object Main {
     val nonZeroCount = lnrdd.flatMap(ir => ir.vector.toArray).filter(d => d != 0.0).count()
     println("Sparsity: " + nonZeroCount.toDouble / (n*n))
 
-    val matrix = new IndexedRowMatrix(lnrdd)
-      .toBlockMatrix(100, 100)
-      .persist(StorageLevel.MEMORY_AND_DISK_SER)
+    // Add n*I to the random matrix to guarantee diagonal dominance and a well-conditioned result
+    val baseMatrix = new IndexedRowMatrix(lnrdd).toCoordinateMatrix()
+    val diagEntries = sc.range(0, n).map(i => MatrixEntry(i, i, n.toDouble))
+    val diagMatrix = new CoordinateMatrix(diagEntries, n, n)
+    val matrix = baseMatrix.add(diagMatrix).toBlockMatrix(100, 100)
+
     println("Matrix shape: " + matrix.numRows() + ", " + matrix.numCols())
     matrix.blocks.count()
     val t = System.nanoTime()
     val inverted = matrix.inverse(250)
-      .persist(StorageLevel.MEMORY_AND_DISK_SER)
 
     val eyeMaybe = matrix.multiply(inverted).toCoordinateMatrix().entries
     val errorSum = eyeMaybe
