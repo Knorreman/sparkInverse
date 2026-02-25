@@ -19,22 +19,17 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    strategy:
+      matrix:
+        java-version: [ '17', '21' ]
+
     steps:
     - uses: actions/checkout@v3
-    - name: Set up JDK 11
+    - name: Set up JDK ${{ matrix.java-version }}
       uses: actions/setup-java@v3
       with:
-        java-version: '11'
+        java-version: ${{ matrix.java-version }}
         distribution: 'temurin'
         cache: 'sbt'
-    - name: Run tests jdk11
-      run: sbt test
-
-    - name: Set up JDK 8
-      uses: actions/setup-java@v3
-      with:
-        java-version: '8'
-        distribution: 'temurin'
-        cache: 'sbt'
-    - name: Runt test jdk8
+    - name: Run tests jdk${{ matrix.java-version }}
       run: sbt test
