@@ -79,7 +79,7 @@ object Inverse {
      */
     def inverse(limit: Int, numMidDimSplits: Int, useCheckpoints: Boolean = true, depth: Int = 0): BlockMatrix = {
 
-      require(matrix.blocks.sparkContext.getCheckpointDir.isDefined || useCheckpoints, "Checkpointing dir has to be set!")
+      require(!useCheckpoints || matrix.blocks.sparkContext.getCheckpointDir.isDefined, "Checkpointing dir has to be set when useCheckpoints=true!")
       require(matrix.numRows() == matrix.numCols(), "Matrix has to be square!")
       val colsPerBlock = matrix.colsPerBlock
       val rowsPerBlock = matrix.rowsPerBlock
@@ -113,10 +113,10 @@ object Inverse {
 
 
       if (useCheckpoints) {
-        E.checkpoint()
-        F.checkpoint()
-        G.checkpoint()
-        H.checkpoint()
+        E.persist().checkpoint()
+        F.persist().checkpoint()
+        G.persist().checkpoint()
+        H.persist().checkpoint()
         cachedMatrices.addOne(E)
         cachedMatrices.addOne(F)
         cachedMatrices.addOne(G)
@@ -131,7 +131,10 @@ object Inverse {
       }.setName("E_inv")
 
       if (useCheckpoints) {
-        E_inv.checkpoint()
+        E_inv.persist().checkpoint()
+        cachedMatrices.addOne(E_inv)
+      } else {
+        E_inv.persist()
         cachedMatrices.addOne(E_inv)
       }
 
@@ -139,10 +142,13 @@ object Inverse {
       val S = H.add(G.multiply(mE_invF, numMidDimSplits)).setName("S")
 
       if (useCheckpoints) {
-        mE_invF.checkpoint()
-        S.checkpoint()
+        mE_invF.persist().checkpoint()
+        S.persist().checkpoint()
         cachedMatrices.addOne(mE_invF)
         cachedMatrices.addOne(S)
+      } else {
+        mE_invF.persist()
+        cachedMatrices.addOne(mE_invF)
       }
 
       val S_inv = if (m_bc.value > (limit / colsPerBlock)) {
@@ -152,21 +158,27 @@ object Inverse {
       }.setName("S_inv")
 
       if (useCheckpoints) {
-        S_inv.checkpoint()
+        S_inv.persist().checkpoint()
+        cachedMatrices.addOne(S_inv)
+      } else {
+        S_inv.persist()
         cachedMatrices.addOne(S_inv)
       }
 
       val GE_inv = G.multiply(E_inv, numMidDimSplits).setName("GE_inv")
       if (useCheckpoints) {
-        GE_inv.checkpoint()
+        GE_inv.persist().checkpoint()
+        cachedMatrices.addOne(GE_inv)
+      } else {
+        GE_inv.persist()
         cachedMatrices.addOne(GE_inv)
       }
 
       val mS_invGE_inv = S_inv.negative().multiply(GE_inv, numMidDimSplits).setName("mS_invGE_inv")
       val mE_invFS_inv = mE_invF.multiply(S_inv, numMidDimSplits).setName("mE_invFS_inv")
       if (useCheckpoints) {
-        mS_invGE_inv.checkpoint()
-        mE_invFS_inv.checkpoint()
+        mS_invGE_inv.persist().checkpoint()
+        mE_invFS_inv.persist().checkpoint()
         cachedMatrices.addOne(mS_invGE_inv)
         cachedMatrices.addOne(mE_invFS_inv)
       }
@@ -189,9 +201,9 @@ object Inverse {
 
       val bm = new BlockMatrix(all_blocks, rowsPerBlock, colsPerBlock, matrix.numRows(), matrix.numCols())
       if (useCheckpoints) {
-        bm.checkpoint()
-        cachedMatrices.foreach(bm => bm.blocks.unpersist(true))
+        bm.persist().checkpoint()
       }
+      cachedMatrices.foreach(bm => bm.blocks.unpersist(true))
       bm
     }
 
@@ -256,6 +268,10 @@ object Inverse {
 
     def setName (name: String): BlockMatrix = {
       matrix.blocks.setName(name)
+      matrix
+    }
+    def persist(): BlockMatrix = {
+      matrix.blocks.persist()
       matrix
     }
     def checkpoint(): BlockMatrix = {
@@ -326,7 +342,7 @@ object Inverse {
      */
     def inverse(limit: Int, useCheckpoints: Boolean = true, depth: Int = 0): CoordinateMatrix = {
 
-      require(matrix.entries.sparkContext.getCheckpointDir.isDefined || useCheckpoints, "Checkpointing dir has to be set!")
+      require(!useCheckpoints || matrix.entries.sparkContext.getCheckpointDir.isDefined, "Checkpointing dir has to be set when useCheckpoints=true!")
       require(matrix.numRows() == matrix.numCols(), "Matrix has to be square!")
       val numCols = matrix.numCols()
       val numRows = matrix.numRows()
@@ -351,10 +367,10 @@ object Inverse {
         .setName("H")
 
       if (useCheckpoints) {
-        E.checkpoint()
-        F.checkpoint()
-        G.checkpoint()
-        H.checkpoint()
+        E.persist().checkpoint()
+        F.persist().checkpoint()
+        G.persist().checkpoint()
+        H.persist().checkpoint()
         cachedMatrices.addOne(E)
         cachedMatrices.addOne(F)
         cachedMatrices.addOne(G)
@@ -369,7 +385,10 @@ object Inverse {
       }.setName("E_inv")
 
       if (useCheckpoints) {
-        E_inv.checkpoint()
+        E_inv.persist().checkpoint()
+        cachedMatrices.addOne(E_inv)
+      } else {
+        E_inv.persist()
         cachedMatrices.addOne(E_inv)
       }
 
@@ -377,10 +396,13 @@ object Inverse {
       val S = H.add(G.multiply(mE_invF)).setName("S")
 
       if (useCheckpoints) {
-        mE_invF.checkpoint()
-        S.checkpoint()
+        mE_invF.persist().checkpoint()
+        S.persist().checkpoint()
         cachedMatrices.addOne(mE_invF)
         cachedMatrices.addOne(S)
+      } else {
+        mE_invF.persist()
+        cachedMatrices.addOne(mE_invF)
       }
 
       val S_inv = if (m_bc.value > limit) {
@@ -390,21 +412,27 @@ object Inverse {
       }.setName("S_inv")
 
       if (useCheckpoints) {
-        S_inv.checkpoint()
+        S_inv.persist().checkpoint()
+        cachedMatrices.addOne(S_inv)
+      } else {
+        S_inv.persist()
         cachedMatrices.addOne(S_inv)
       }
 
       val GE_inv = G.multiply(E_inv).setName("GE_inv")
       if (useCheckpoints) {
-        GE_inv.checkpoint()
+        GE_inv.persist().checkpoint()
+        cachedMatrices.addOne(GE_inv)
+      } else {
+        GE_inv.persist()
         cachedMatrices.addOne(GE_inv)
       }
 
       val mS_invGE_inv = S_inv.negative().multiply(GE_inv).setName("mS_invGE_inv")
       val mE_invFS_inv = mE_invF.multiply(S_inv).setName("mE_invFS_inv")
       if (useCheckpoints) {
-        mS_invGE_inv.checkpoint()
-        mE_invFS_inv.checkpoint()
+        mS_invGE_inv.persist().checkpoint()
+        mE_invFS_inv.persist().checkpoint()
         cachedMatrices.addOne(mS_invGE_inv)
         cachedMatrices.addOne(mE_invFS_inv)
       }
@@ -427,9 +455,9 @@ object Inverse {
 
       val cm = new CoordinateMatrix(all_blocks, matrix.numRows(), matrix.numCols())
       if (useCheckpoints) {
-        cm.checkpoint()
-        cachedMatrices.foreach(cm => cm.entries.unpersist(true))
+        cm.persist().checkpoint()
       }
+      cachedMatrices.foreach(cm => cm.entries.unpersist(true))
       cm
     }
 
@@ -482,17 +510,17 @@ object Inverse {
     }
 
     def add(other: CoordinateMatrix): CoordinateMatrix = {
-      val entries = matrix.entries.keyBy{ case MatrixEntry(i, j, _) => (i, j)}
-        .join(other.entries.keyBy{ case MatrixEntry(i, j, _) => (i, j)})
-        .mapValues{ case (me1, me2) => me1.value + me2.value}
-        .map{ case ((i, j), v)  => MatrixEntry(i, j, v)}
+      val entries = matrix.entries.map { case MatrixEntry(i, j, v) => ((i, j), v) }
+        .union(other.entries.map { case MatrixEntry(i, j, v) => ((i, j), v) })
+        .reduceByKey(_ + _)
+        .map { case ((i, j), v) => MatrixEntry(i, j, v) }
       new CoordinateMatrix(entries, matrix.numRows(), matrix.numCols())
     }
 
     def subtract(other: CoordinateMatrix): CoordinateMatrix = {
-      val entries = matrix.entries.keyBy { case MatrixEntry(i, j, _) => (i, j) }
-        .join(other.entries.keyBy { case MatrixEntry(i, j, _) => (i, j) })
-        .mapValues { case (me1, me2) => me1.value - me2.value }
+      val entries = matrix.entries.map { case MatrixEntry(i, j, v) => ((i, j), v) }
+        .union(other.entries.map { case MatrixEntry(i, j, v) => ((i, j), -v) })
+        .reduceByKey(_ + _)
         .map { case ((i, j), v) => MatrixEntry(i, j, v) }
       new CoordinateMatrix(entries, matrix.numRows(), matrix.numCols())
     }
@@ -504,29 +532,30 @@ object Inverse {
       new CoordinateMatrix(newEntries, matrix.numRows(), matrix.numCols())
     }
 
-//    def leftPseudoInverse(limit: Int): CoordinateMatrix = {
-//      matrix.transpose.multiply(matrix).inverse(limit).multiply(matrix.transpose)
-//    }
-//
-//    def leftPseudoInverse(limit: Int): CoordinateMatrix = {
-//      leftPseudoInverse(limit)
-//    }
-//
-//    def leftPseudoInverse(): CoordinateMatrix = {
-//      matrix.transpose.multiply(matrix).inverse().multiply(matrix.transpose)
-//    }
-//
-//    def rightPseudoInverse(limit: Int): CoordinateMatrix = {
-//      matrix.transpose.multiply(matrix.multiply(matrix.transpose).inverse(limit))
-//    }
-//
-//    def rightPseudoInverse(limit: Int): CoordinateMatrix = {
-//      rightPseudoInverse(limit)
-//    }
-//
-//    def rightPseudoInverse(): CoordinateMatrix = {
-//      matrix.transpose.multiply(matrix.multiply(matrix.transpose).inverse())
-//    }
+    def transpose(): CoordinateMatrix = {
+      val t = matrix.entries.map { case MatrixEntry(i, j, v) => MatrixEntry(j, i, v) }
+      new CoordinateMatrix(t, matrix.numCols(), matrix.numRows())
+    }
+
+    def leftPseudoInverse(limit: Int): CoordinateMatrix = {
+      val at = matrix.transpose()
+      at.multiply(matrix).inverse(limit).multiply(at)
+    }
+
+    def leftPseudoInverse(): CoordinateMatrix = {
+      val at = matrix.transpose()
+      at.multiply(matrix).inverse().multiply(at)
+    }
+
+    def rightPseudoInverse(limit: Int): CoordinateMatrix = {
+      val at = matrix.transpose()
+      at.multiply(matrix.multiply(at).inverse(limit))
+    }
+
+    def rightPseudoInverse(): CoordinateMatrix = {
+      val at = matrix.transpose()
+      at.multiply(matrix.multiply(at).inverse())
+    }
 
     def setName(name: String): CoordinateMatrix = {
       matrix.entries.setName(name)
@@ -534,6 +563,10 @@ object Inverse {
     }
     def cache(): CoordinateMatrix = {
       matrix.entries.cache()
+      matrix
+    }
+    def persist(): CoordinateMatrix = {
+      matrix.entries.persist()
       matrix
     }
     def persist(storageLevel: StorageLevel): CoordinateMatrix = {
