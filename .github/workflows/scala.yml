@@ -31,9 +31,7 @@ jobs:
         java-version: ${{ matrix.java-version }}
         distribution: 'temurin'
         cache: 'sbt'
-    - name: Install sbt
-      run: |
-        curl -fL https://github.com/sbt/sbt/releases/download/v1.12.4/sbt-1.12.4.tgz | tar xz -C /usr/local
-        echo "/usr/local/sbt/bin" >> $GITHUB_PATH
+    - name: Setup sbt
+      uses: sbt/setup-sbt@v1
     - name: Run tests jdk${{ matrix.java-version }}
       run: sbt test
