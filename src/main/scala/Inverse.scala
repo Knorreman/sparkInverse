@@ -1,14 +1,13 @@
-import org.apache.spark.mllib.linalg.{DenseMatrix, DenseVector, Matrix}
-import org.apache.spark.mllib.linalg._
+import dev.ludovic.netlib.lapack.LAPACK
+import org.apache.spark.Partitioner
 import org.apache.spark.mllib.linalg.distributed.{BlockMatrix, CoordinateMatrix, MatrixEntry}
+import org.apache.spark.mllib.linalg.{DenseMatrix, DenseVector, Matrix}
+import org.apache.spark.rdd.RDD
+import org.apache.spark.storage.StorageLevel
+import org.netlib.util.intW
 
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
-import org.apache.spark.Partitioner
-import org.apache.spark.rdd.RDD
-import org.apache.spark.storage.StorageLevel
-import dev.ludovic.netlib.lapack.NativeLAPACK
-import org.netlib.util.intW
 
 object Inverse {
   private val eyeBlockMatrixMap: mutable.Map[(Long, Double, Int, Int), BlockMatrix] = mutable.Map[(Long, Double, Int, Int), BlockMatrix]()
@@ -35,7 +34,7 @@ object Inverse {
     val a = data.clone()
     val ipiv = new Array[Int](n)
     val info = new intW(0)
-    val lapack = NativeLAPACK.getInstance()
+    val lapack = LAPACK.getInstance()
 
     lapack.dgetrf(n, n, a, n, ipiv, info)
     require(info.`val` == 0, s"luInverse: singular matrix (dgetrf info=${info.`val`})")
