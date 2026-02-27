@@ -1,17 +1,61 @@
-import dev.ludovic.netlib.lapack.LAPACK
+import org.apache.spark.HashPartitioner
 import org.apache.spark.Partitioner
 import org.apache.spark.mllib.linalg.distributed.{BlockMatrix, CoordinateMatrix, MatrixEntry}
 import org.apache.spark.mllib.linalg.{DenseMatrix, DenseVector, Matrix}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
-import org.netlib.util.intW
+
+import breeze.linalg.{DenseMatrix => BDM, inv => BINV}
 
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
 
 object Inverse {
+  final case class RecursivePerfConfig(
+    trace: Boolean = false,
+    targetOutputPartitions: Option[Int] = None,
+    unionCoalesceThreshold: Int = 8,
+    adaptiveMidDimSplits: Boolean = true)
+
+  final case class IterativePerfConfig(
+    persistLevel: StorageLevel = StorageLevel.MEMORY_AND_DISK_SER,
+    checkpointEvery: Int = 5,
+    useLocalCheckpoint: Boolean = false,
+    adaptiveMidDimSplits: Boolean = true,
+    maxAdaptiveMidDimSplits: Int = 16,
+    largeMatrixCheckpointEvery: Int = 2,
+    largeMatrixThreshold: Int = 4000,
+    trace: Boolean = false)
+
   private val eyeBlockMatrixMap: mutable.Map[(Long, Double, Int, Int), BlockMatrix] = mutable.Map[(Long, Double, Int, Int), BlockMatrix]()
   private val eyeCoordinateMatrixMap: mutable.Map[(Long, Double), CoordinateMatrix] = mutable.Map[(Long, Double), CoordinateMatrix]()
+
+  private def trace(enabled: Boolean, message: => String): Unit = {
+    if (enabled) {
+      println(message)
+    }
+  }
+
+  private def timed[A](enabled: Boolean, label: String)(f: => A): A = {
+    if (!enabled) {
+      f
+    } else {
+      val t0 = System.nanoTime()
+      val out = f
+      val elapsedMs = (System.nanoTime() - t0) / 1e6
+      println(f"[perf] $label took $elapsedMs%.2f ms")
+      out
+    }
+  }
+
+  private def maybeCoalesceNoShuffle[T](rdd: RDD[T], targetPartitions: Int, threshold: Int): RDD[T] = {
+    val current = rdd.getNumPartitions
+    if (targetPartitions > 0 && current - targetPartitions > threshold) {
+      rdd.coalesce(targetPartitions, shuffle = false)
+    } else {
+      rdd
+    }
+  }
 
   private def scaleDenseCopy(mat: Matrix, scale: Double): Matrix = {
     val arr = mat.toArray
@@ -24,34 +68,25 @@ object Inverse {
   }
 
   /**
-   * Invert an n×n matrix using LAPACK dgetrf (LU factorization) + dgetri (inversion from LU).
+   * Invert an n×n matrix using Breeze dense inverse.
    *
    * @param data Column-major array of length n*n (not modified)
    * @param n    Matrix dimension
    * @return Column-major array of length n*n containing the inverse
    */
   private[Inverse] def luInverse(data: Array[Double], n: Int): Array[Double] = {
-    val a = data.clone()
-    val ipiv = new Array[Int](n)
-    val info = new intW(0)
-    val lapack = LAPACK.getInstance()
-
-    lapack.dgetrf(n, n, a, n, ipiv, info)
-    require(info.`val` == 0, s"luInverse: singular matrix (dgetrf info=${info.`val`})")
-
-    val lworkQuery = new Array[Double](1)
-    lapack.dgetri(n, a, n, ipiv, lworkQuery, -1, info)
-    val work = new Array[Double](lworkQuery(0).toInt.max(1))
-    lapack.dgetri(n, a, n, ipiv, work, work.length, info)
-    require(info.`val` == 0, s"luInverse: dgetri failed (info=${info.`val`})")
-
-    a
+    require(data.length == n * n, s"luInverse: expected ${n * n} elements, got ${data.length}")
+    require(n > 0, "luInverse: matrix dimension must be positive")
+    val a = new BDM[Double](n, n, data.clone())
+    val inv = BINV(a)
+    inv.toArray
   }
 
   implicit class BlockMatrixInverse(val matrix: BlockMatrix) {
 
     private val iterativeStorageLevel = StorageLevel.MEMORY_AND_DISK_SER
     private val cachedMatrices: ListBuffer[BlockMatrix] = mutable.ListBuffer.empty
+    private case class BlockQuadrants(E: BlockMatrix, F: BlockMatrix, G: BlockMatrix, H: BlockMatrix)
 
     private def persistAndTrack(mat: BlockMatrix, useCheckpoints: Boolean): BlockMatrix = {
       if (useCheckpoints) {
@@ -62,6 +97,114 @@ object Inverse {
       }
       cachedMatrices.addOne(mat)
       mat
+    }
+
+    private def validateInverseInputs(useCheckpoints: Boolean): Unit = {
+      require(!useCheckpoints || matrix.blocks.sparkContext.getCheckpointDir.isDefined,
+        "Checkpointing dir has to be set when useCheckpoints=true!")
+      require(matrix.numRows() == matrix.numCols(), "Matrix has to be square!")
+      require(matrix.colsPerBlock == matrix.rowsPerBlock, "Sub-matrices has to be square!")
+    }
+
+    private def effectiveMidDimSplits(numMidDimSplits: Int, perf: RecursivePerfConfig): Int = {
+      val requested = math.max(1, numMidDimSplits)
+      if (!perf.adaptiveMidDimSplits || requested > 1) {
+        requested
+      } else {
+        val blockRows = ((matrix.numRows() + matrix.rowsPerBlock - 1) / matrix.rowsPerBlock).toInt
+        val blockCols = ((matrix.numCols() + matrix.colsPerBlock - 1) / matrix.colsPerBlock).toInt
+        val partitionBound = math.max(1, matrix.blocks.getNumPartitions / 2)
+        val adaptive = math.max(1, math.min(16, math.min(math.min(blockRows, blockCols), partitionBound)))
+        adaptive
+      }
+    }
+
+    private def effectiveIterativeMidDimSplits(numMidDimSplits: Int, perf: IterativePerfConfig): Int = {
+      val requested = math.max(1, numMidDimSplits)
+      if (!perf.adaptiveMidDimSplits || requested > 1) {
+        requested
+      } else {
+        val blockRows = ((matrix.numRows() + matrix.rowsPerBlock - 1) / matrix.rowsPerBlock).toInt
+        val blockCols = ((matrix.numCols() + matrix.colsPerBlock - 1) / matrix.colsPerBlock).toInt
+        val partitionBound = math.max(1, matrix.blocks.getNumPartitions / 2)
+        val adaptiveMax = math.max(1, perf.maxAdaptiveMidDimSplits)
+        math.max(1, math.min(adaptiveMax, math.min(math.min(blockRows, blockCols), partitionBound)))
+      }
+    }
+
+    private def maybeCheckpoint(
+      rdd: RDD[((Int, Int), Matrix)],
+      useCheckpoints: Boolean,
+      useLocalCheckpoint: Boolean): Unit = {
+      if (useCheckpoints) {
+        rdd.checkpoint()
+      } else if (useLocalCheckpoint) {
+        rdd.localCheckpoint()
+      }
+    }
+
+    private def persistIfNeeded(rdd: RDD[((Int, Int), Matrix)], storageLevel: StorageLevel): Boolean = {
+      val shouldPersist = rdd.getStorageLevel == StorageLevel.NONE
+      if (shouldPersist) {
+        rdd.persist(storageLevel)
+      }
+      shouldPersist
+    }
+
+    private def splitQuadrants(m: Int, splitSize: Long, res: Long): BlockQuadrants = {
+      val rowsPerBlock = matrix.rowsPerBlock
+      val colsPerBlock = matrix.colsPerBlock
+      val blocks = matrix.blocks
+
+      val E = new BlockMatrix(blocks.filter { case ((i, j), _) => i < m && j < m },
+        rowsPerBlock, colsPerBlock, splitSize, splitSize).setName("E")
+      val F = new BlockMatrix(blocks.filter { case ((i, j), _) => i < m && j >= m }
+        .map { case ((i, j), block) => ((i, j - m), block) },
+        rowsPerBlock, colsPerBlock, splitSize, res).setName("F")
+      val G = new BlockMatrix(blocks.filter { case ((i, j), _) => i >= m && j < m }
+        .map { case ((i, j), block) => ((i - m, j), block) },
+        rowsPerBlock, colsPerBlock, res, splitSize).setName("G")
+      val H = new BlockMatrix(blocks.filter { case ((i, j), _) => i >= m && j >= m }
+        .map { case ((i, j), block) => ((i - m, j - m), block) },
+        rowsPerBlock, colsPerBlock, res, res).setName("H")
+
+      BlockQuadrants(E, F, G, H)
+    }
+
+    private def shiftAndScaleBlocks(
+      blocks: RDD[((Int, Int), Matrix)],
+      rowOffset: Int = 0,
+      colOffset: Int = 0,
+      scale: Double = 1.0): RDD[((Int, Int), Matrix)] = {
+      if (rowOffset == 0 && colOffset == 0 && scale == 1.0) {
+        blocks
+      } else {
+        blocks.map { case ((i, j), mat) =>
+          val shiftedIndex = (i + rowOffset, j + colOffset)
+          val adjusted = if (scale == 1.0) mat else scaleDenseCopy(mat, scale)
+          (shiftedIndex, adjusted)
+        }
+      }
+    }
+
+    private def invertPartition(
+      partition: BlockMatrix,
+      partitionBlockSize: Int,
+      recurseThresholdInBlocks: Int,
+      limit: Int,
+      numMidDimSplits: Int,
+      useCheckpoints: Boolean,
+      depth: Int,
+      name: String,
+      perf: RecursivePerfConfig): BlockMatrix = {
+      val inv = if (partitionBlockSize > recurseThresholdInBlocks) {
+        partition.inverse(limit, numMidDimSplits, useCheckpoints, depth = depth + 1, perf)
+      } else {
+        partition.localInv()
+      }
+      val named = inv.setName(name)
+      persistAndTrack(named, useCheckpoints)
+      named
     }
 
     private def localDenseToBlockMatrix(data: Array[Double], n: Int, rowsPerBlock: Int, colsPerBlock: Int): BlockMatrix = {
@@ -132,7 +275,7 @@ object Inverse {
 
     /**
      * Computes the matrix inverse by collecting to the driver and using LU factorization.
-     * Uses a pure-JVM Gauss-Jordan implementation — no native BLAS/LAPACK dependency.
+     * Uses Breeze dense inverse on the collected local matrix.
      * Should be used for relatively small BlockMatrices (the base case of recursive inversion).
      *
      * @return Inverted BlockMatrix
@@ -176,86 +319,70 @@ object Inverse {
      * @return BlockMatrix
      */
     def inverse(limit: Int, numMidDimSplits: Int, useCheckpoints: Boolean = true, depth: Int = 0): BlockMatrix = {
+      inverse(limit, numMidDimSplits, useCheckpoints, depth, RecursivePerfConfig())
+    }
 
-      require(!useCheckpoints || matrix.blocks.sparkContext.getCheckpointDir.isDefined, "Checkpointing dir has to be set when useCheckpoints=true!")
-      require(matrix.numRows() == matrix.numCols(), "Matrix has to be square!")
+    def inverse(limit: Int, numMidDimSplits: Int, useCheckpoints: Boolean, depth: Int, perf: RecursivePerfConfig): BlockMatrix = {
+      validateInverseInputs(useCheckpoints)
       val colsPerBlock = matrix.colsPerBlock
       val rowsPerBlock = matrix.rowsPerBlock
-      require(colsPerBlock == rowsPerBlock, "Sub-matrices has to be square!")
+      val midSplits = effectiveMidDimSplits(numMidDimSplits, perf)
       val numBlockCols = ((matrix.numCols() + colsPerBlock - 1) / colsPerBlock).toInt
       val m = (numBlockCols + 1) / 2
       val splitSize = math.min(matrix.numRows(), m.toLong * rowsPerBlock)
-      val blocks = matrix.blocks
       val numParts = (matrix.blocks.getNumPartitions).toInt
 
+      trace(perf.trace, s"[perf][recursive] depth=$depth inputParts=${matrix.blocks.getNumPartitions} midSplits=$midSplits")
       println("Input matrix shape: " + matrix.numRows() + ", " + matrix.numCols() + " At depth=" + depth)
 
       val res = matrix.numRows() - splitSize
 
-      // split into block partitions and readjust the block indices
-      val E = new BlockMatrix(blocks.filter { case ((i, j), _) => i < m && j < m }, rowsPerBlock, colsPerBlock, splitSize, splitSize)
-        .setName("E")
-      val F = new BlockMatrix(blocks.filter { case ((i, j), _) => i < m && j >= m }
-        .map { case ((i, j), matrix) => ((i, j - m), matrix) }, rowsPerBlock, colsPerBlock, splitSize, res)
-        .setName("F")
-      val G = new BlockMatrix(blocks.filter { case ((i, j), _) => i >= m && j < m }
-        .map { case ((i, j), matrix) => ((i - m, j), matrix) }, rowsPerBlock, colsPerBlock, res, splitSize)
-        .setName("G")
-      val H = new BlockMatrix(blocks.filter { case ((i, j), _) => i >= m && j >= m }
-        .map { case ((i, j), matrix) => ((i - m, j - m), matrix) }, rowsPerBlock, colsPerBlock, res, res)
-        .setName("H")
+      val BlockQuadrants(e, f, g, h) = splitQuadrants(m, splitSize, res)
 
-      persistAndTrack(E, useCheckpoints)
-      persistAndTrack(F, useCheckpoints)
-      persistAndTrack(G, useCheckpoints)
-      persistAndTrack(H, useCheckpoints)
+      persistAndTrack(e, useCheckpoints)
+      persistAndTrack(f, useCheckpoints)
+      persistAndTrack(g, useCheckpoints)
+      persistAndTrack(h, useCheckpoints)
 
       val recurseThresholdInBlocks = math.max(1, limit / colsPerBlock)
-      val E_inv = if (m > recurseThresholdInBlocks) {
-        E.inverse(limit, numMidDimSplits, useCheckpoints, depth = depth + 1)
-      } else {
-        E.localInv()
-      }.setName("E_inv")
+      val E_inv = timed(perf.trace, s"[perf][recursive] depth=$depth E inverse") {
+        invertPartition(e, m, recurseThresholdInBlocks, limit, midSplits, useCheckpoints, depth, "E_inv", perf)
+      }
 
-      persistAndTrack(E_inv, useCheckpoints)
-
-      val GE_inv = G.multiply(E_inv, numMidDimSplits).setName("GE_inv")
-      val E_invF = E_inv.multiply(F, numMidDimSplits).setName("E_invF")
+      val GE_inv = timed(perf.trace, s"[perf][recursive] depth=$depth G*E_inv") {
+        g.multiply(E_inv, midSplits).setName("GE_inv")
+      }
+      val E_invF = timed(perf.trace, s"[perf][recursive] depth=$depth E_inv*F") {
+        E_inv.multiply(f, midSplits).setName("E_invF")
+      }
 
       persistAndTrack(GE_inv, useCheckpoints)
       persistAndTrack(E_invF, useCheckpoints)
 
-      val S = H.subtract(G.multiply(E_invF, numMidDimSplits)).setName("S")
+      val S = timed(perf.trace, s"[perf][recursive] depth=$depth Schur S") {
+        h.subtract(g.multiply(E_invF, midSplits)).setName("S")
+      }
       persistAndTrack(S, useCheckpoints)
 
-      val S_inv = if (m > recurseThresholdInBlocks) {
-        S.inverse(limit, numMidDimSplits, useCheckpoints, depth = depth + 1)
-      } else {
-        S.localInv()
-      }.setName("S_inv")
+      val S_inv = timed(perf.trace, s"[perf][recursive] depth=$depth S inverse") {
+        invertPartition(S, m, recurseThresholdInBlocks, limit, midSplits, useCheckpoints, depth, "S_inv", perf)
+      }
 
-      persistAndTrack(S_inv, useCheckpoints)
-
-      val S_invGE_inv = S_inv.multiply(GE_inv, numMidDimSplits).setName("S_invGE_inv")
-      val E_invFS_inv = E_invF.multiply(S_inv, numMidDimSplits).setName("E_invFS_inv")
+      val S_invGE_inv = S_inv.multiply(GE_inv, midSplits).setName("S_invGE_inv")
+      val E_invFS_inv = E_invF.multiply(S_inv, midSplits).setName("E_invFS_inv")
       persistAndTrack(S_invGE_inv, useCheckpoints)
       persistAndTrack(E_invFS_inv, useCheckpoints)
 
-      val top_left = E_inv.add(E_invFS_inv.multiply(GE_inv, numMidDimSplits)).blocks
-
-      // Readjust the block indices
-      val top_right = E_invFS_inv.blocks.map {
-        case ((i, j), mat) => ((i, j + m), scaleDenseCopy(mat, -1.0))
-      }
-      val bottom_left = S_invGE_inv.blocks.map {
-        case ((i, j), mat) => ((i + m, j), scaleDenseCopy(mat, -1.0))
-      }
-      val bottom_right = S_inv.blocks.map {
-        case ((i, j), mat) => ((i + m, j + m), mat)
-      }
-      val sc = top_left.sparkContext
-      val all_blocks = sc.union(top_left, top_right, bottom_left, bottom_right)
-        .coalesce(numParts)
+      val topLeft = E_inv.add(E_invFS_inv.multiply(GE_inv, midSplits))
+      val sc = topLeft.blocks.sparkContext
+      val unionedBlocks = sc.union(
+        topLeft.blocks,
+        shiftAndScaleBlocks(E_invFS_inv.blocks, colOffset = m, scale = -1.0),
+        shiftAndScaleBlocks(S_invGE_inv.blocks, rowOffset = m, scale = -1.0),
+        shiftAndScaleBlocks(S_inv.blocks, rowOffset = m, colOffset = m))
+      val defaultOutputParts = math.max(numParts, math.min(unionedBlocks.getNumPartitions, numParts * 2))
+      val outputParts = perf.targetOutputPartitions.getOrElse(defaultOutputParts)
+      val all_blocks = maybeCoalesceNoShuffle(unionedBlocks, outputParts, perf.unionCoalesceThreshold)
 
       val bm = new BlockMatrix(all_blocks, rowsPerBlock, colsPerBlock, matrix.numRows(), matrix.numCols())
       if (useCheckpoints) {
@@ -349,18 +476,54 @@ object Inverse {
     def iterativeInverse(maxIter: Int = 30, tolerance: Double = 1e-10,
                          useCheckpoints: Boolean = true, checkpointInterval: Int = 5,
                          numMidDimSplits: Int = 1): BlockMatrix = {
+      iterativeInverse(
+        maxIter,
+        tolerance,
+        useCheckpoints,
+        checkpointInterval,
+        numMidDimSplits,
+        IterativePerfConfig(
+          persistLevel = iterativeStorageLevel,
+          checkpointEvery = checkpointInterval,
+          useLocalCheckpoint = false,
+          adaptiveMidDimSplits = true,
+          maxAdaptiveMidDimSplits = 16,
+          largeMatrixCheckpointEvery = 2,
+          largeMatrixThreshold = 4000,
+          trace = false))
+    }
+
+    def iterativeInverse(
+      maxIter: Int,
+      tolerance: Double,
+      useCheckpoints: Boolean,
+      checkpointInterval: Int,
+      numMidDimSplits: Int,
+      perf: IterativePerfConfig): BlockMatrix = {
       require(!useCheckpoints || matrix.blocks.sparkContext.getCheckpointDir.isDefined,
         "Checkpointing dir has to be set when useCheckpoints=true!")
       require(matrix.numRows() == matrix.numCols(), "Matrix has to be square!")
+      val storageLevel = perf.persistLevel
+      val baseCheckpointEvery = math.max(1, perf.checkpointEvery)
+      val effectiveCheckpointEvery =
+        if (matrix.numRows() >= perf.largeMatrixThreshold) {
+          math.max(1, math.min(baseCheckpointEvery, perf.largeMatrixCheckpointEvery))
+        } else {
+          baseCheckpointEvery
+        }
+      val midSplits = effectiveIterativeMidDimSplits(numMidDimSplits, perf)
+      if (perf.checkpointEvery != checkpointInterval) {
+        trace(perf.trace, s"[perf][iterative] using checkpointEvery=${perf.checkpointEvery} (requested=$checkpointInterval)")
+      }
 
       val shouldPersistInput = matrix.blocks.getStorageLevel == StorageLevel.NONE
       if (shouldPersistInput) {
-        matrix.blocks.persist(iterativeStorageLevel)
+        matrix.blocks.persist(storageLevel)
       }
 
       val n = matrix.numRows()
-      val norm1 = matrix.normOne()
-      val normInfVal = matrix.normInf()
+      val norm1 = timed(perf.trace, "[perf][iterative] ||A||_1") { matrix.normOne() }
+      val normInfVal = timed(perf.trace, "[perf][iterative] ||A||_inf") { matrix.normInf() }
       val alpha = 1.0 / (norm1 * normInfVal)
 
       println(s"iterativeInverse: n=$n, ||A||_1=$norm1, ||A||_inf=$normInfVal, alpha=$alpha")
@@ -369,8 +532,8 @@ object Inverse {
       // Use MEMORY_AND_DISK_SER so Spark can spill to disk under memory pressure
       // instead of OOMing when n is large.
       var X = matrix.transpose.scalarMultiply(alpha)
-      X.blocks.persist(iterativeStorageLevel)
-      if (useCheckpoints) X.checkpoint()
+      X.blocks.persist(storageLevel)
+      maybeCheckpoint(X.blocks, useCheckpoints, perf.useLocalCheckpoint)
 
       val eye = createEye(n, 1.0)
       val twoEye = createEye(n, 2.0)
@@ -382,12 +545,13 @@ object Inverse {
 
         // AX = A * X_k — computed once and reused for both the update step and
         // the convergence check, avoiding a redundant second multiply.
-        val AX = matrix.multiply(X, numMidDimSplits)
-        AX.blocks.persist(iterativeStorageLevel)
+        val AX = timed(perf.trace, s"[perf][iterative] iter=$iter AX") { matrix.multiply(X, midSplits) }
+        AX.blocks.persist(storageLevel)
 
         // Check convergence using AX (= A * X_k) that we already have.
         // This checks the current iterate X_k one step before committing to X_{k+1}.
-        val frobSq = eye.subtract(AX).frobeniusNormSquared()
+        val residual = eye.subtract(AX)
+        val frobSq = residual.frobeniusNormSquared()
         val metric = math.sqrt(frobSq) / n
         println(s"iterativeInverse iter=$iter: ||I - A*X||_F / n = $metric")
         if (metric < tolerance) {
@@ -397,13 +561,16 @@ object Inverse {
         if (!converged) {
           // X_{k+1} = X_k * (2I - A * X_k)
           val twoI_minus_AX = twoEye.subtract(AX)
-          val X_new = X.multiply(twoI_minus_AX, numMidDimSplits)
+          val X_new = timed(perf.trace, s"[perf][iterative] iter=$iter X update") { X.multiply(twoI_minus_AX, midSplits) }
 
           val oldX = X
           X = X_new
-          X.blocks.persist(iterativeStorageLevel)
-          if (useCheckpoints && iter % checkpointInterval == 0) X.checkpoint()
-          X.blocks.count()
+          X.blocks.persist(storageLevel)
+          if (iter % effectiveCheckpointEvery == 0) {
+            maybeCheckpoint(X.blocks, useCheckpoints, perf.useLocalCheckpoint)
+            // Only force materialization when checkpointing to avoid an extra job every iteration.
+            X.blocks.count()
+          }
           oldX.blocks.unpersist(true)
         }
 
@@ -430,8 +597,7 @@ object Inverse {
      */
     private def createEye(n: Long, value: Double = 1.0): BlockMatrix = {
       val key = (n, value, matrix.rowsPerBlock, matrix.colsPerBlock)
-      val eyeMaybe = eyeBlockMatrixMap.get(key)
-      if (eyeMaybe.isEmpty) {
+      eyeBlockMatrixMap.getOrElseUpdate(key, {
         val sc = matrix.blocks.sparkContext
         val diagonal = sc.range(start = 0, end = n)
           .map {
@@ -443,15 +609,28 @@ object Inverse {
         var bm = cm.toBlockMatrix(matrix.rowsPerBlock, matrix.colsPerBlock)
         bm = bm.setName("eye_" + key)
         bm.blocks.persist(iterativeStorageLevel)
-        eyeBlockMatrixMap.put(key, bm)
         bm
-      } else {
-        eyeMaybe.get
-      }
+      })
     }
 
     def leftPseudoInverse(limit: Int, numMidDimSplits: Int): BlockMatrix = {
-      matrix.transpose.multiply(matrix, numMidDimSplits).inverse(limit, numMidDimSplits).multiply(matrix.transpose, numMidDimSplits)
+      val at = matrix.transpose
+      val persistedAt = persistIfNeeded(at.blocks, iterativeStorageLevel)
+      try {
+        val gram = at.multiply(matrix, numMidDimSplits)
+        val persistedGram = persistIfNeeded(gram.blocks, iterativeStorageLevel)
+        try {
+          gram.inverse(limit, numMidDimSplits).multiply(at, numMidDimSplits)
+        } finally {
+          if (persistedGram) {
+            gram.blocks.unpersist(false)
+          }
+        }
+      } finally {
+        if (persistedAt) {
+          at.blocks.unpersist(false)
+        }
+      }
     }
 
     def leftPseudoInverse(limit: Int): BlockMatrix = {
@@ -459,11 +638,43 @@ object Inverse {
     }
 
     def leftPseudoInverse(): BlockMatrix = {
-      matrix.transpose.multiply(matrix).inverse().multiply(matrix.transpose)
+      val at = matrix.transpose
+      val persistedAt = persistIfNeeded(at.blocks, iterativeStorageLevel)
+      try {
+        val gram = at.multiply(matrix)
+        val persistedGram = persistIfNeeded(gram.blocks, iterativeStorageLevel)
+        try {
+          gram.inverse().multiply(at)
+        } finally {
+          if (persistedGram) {
+            gram.blocks.unpersist(false)
+          }
+        }
+      } finally {
+        if (persistedAt) {
+          at.blocks.unpersist(false)
+        }
+      }
     }
 
     def rightPseudoInverse(limit: Int, numMidDimSplits: Int): BlockMatrix = {
-      matrix.transpose.multiply(matrix.multiply(matrix.transpose, numMidDimSplits).inverse(limit, numMidDimSplits), numMidDimSplits)
+      val at = matrix.transpose
+      val persistedAt = persistIfNeeded(at.blocks, iterativeStorageLevel)
+      try {
+        val gram = matrix.multiply(at, numMidDimSplits)
+        val persistedGram = persistIfNeeded(gram.blocks, iterativeStorageLevel)
+        try {
+          at.multiply(gram.inverse(limit, numMidDimSplits), numMidDimSplits)
+        } finally {
+          if (persistedGram) {
+            gram.blocks.unpersist(false)
+          }
+        }
+      } finally {
+        if (persistedAt) {
+          at.blocks.unpersist(false)
+        }
+      }
     }
 
     def rightPseudoInverse(limit: Int): BlockMatrix = {
@@ -471,7 +682,23 @@ object Inverse {
     }
 
     def rightPseudoInverse(): BlockMatrix = {
-      matrix.transpose.multiply(matrix.multiply(matrix.transpose).inverse())
+      val at = matrix.transpose
+      val persistedAt = persistIfNeeded(at.blocks, iterativeStorageLevel)
+      try {
+        val gram = matrix.multiply(at)
+        val persistedGram = persistIfNeeded(gram.blocks, iterativeStorageLevel)
+        try {
+          at.multiply(gram.inverse())
+        } finally {
+          if (persistedGram) {
+            gram.blocks.unpersist(false)
+          }
+        }
+      } finally {
+        if (persistedAt) {
+          at.blocks.unpersist(false)
+        }
+      }
     }
 
     def setName (name: String): BlockMatrix = {
@@ -493,6 +720,7 @@ object Inverse {
 
     private val iterativeStorageLevel = StorageLevel.MEMORY_AND_DISK_SER
     private val cachedMatrices: ListBuffer[CoordinateMatrix] = mutable.ListBuffer.empty
+    private case class CoordinateQuadrants(E: CoordinateMatrix, F: CoordinateMatrix, G: CoordinateMatrix, H: CoordinateMatrix)
 
     private def persistAndTrack(mat: CoordinateMatrix, useCheckpoints: Boolean): CoordinateMatrix = {
       if (useCheckpoints) {
@@ -503,6 +731,99 @@ object Inverse {
       }
       cachedMatrices.addOne(mat)
       mat
+    }
+
+    private def validateInverseInputs(useCheckpoints: Boolean): Unit = {
+      require(!useCheckpoints || matrix.entries.sparkContext.getCheckpointDir.isDefined,
+        "Checkpointing dir has to be set when useCheckpoints=true!")
+      require(matrix.numRows() == matrix.numCols(), "Matrix has to be square!")
+    }
+
+    private def maybeCheckpoint(
+      rdd: RDD[MatrixEntry],
+      useCheckpoints: Boolean,
+      useLocalCheckpoint: Boolean): Unit = {
+      if (useCheckpoints) {
+        rdd.checkpoint()
+      } else if (useLocalCheckpoint) {
+        rdd.localCheckpoint()
+      }
+    }
+
+    private def persistIfNeeded(rdd: RDD[MatrixEntry], storageLevel: StorageLevel): Boolean = {
+      val shouldPersist = rdd.getStorageLevel == StorageLevel.NONE
+      if (shouldPersist) {
+        rdd.persist(storageLevel)
+      }
+      shouldPersist
+    }
+
+    private def partitionCountFor(otherPartitions: Int): Int = {
+      math.max(1, math.max(matrix.entries.getNumPartitions, otherPartitions))
+    }
+
+    private def estimatedPartitionCountFor(other: CoordinateMatrix): Int = {
+      val base = partitionCountFor(other.entries.getNumPartitions)
+      val dimFactor = math.max(1, ((matrix.numRows() + matrix.numCols() + other.numCols()) / 4000L).toInt)
+      val scaled = base * dimFactor
+      math.max(base, math.min(base * 8, scaled))
+    }
+
+    private def effectiveIterativeCheckpointEvery(perf: IterativePerfConfig): Int = {
+      val base = math.max(1, perf.checkpointEvery)
+      if (matrix.numRows() >= perf.largeMatrixThreshold) {
+        math.max(1, math.min(base, perf.largeMatrixCheckpointEvery))
+      } else {
+        base
+      }
+    }
+
+    private def keyedEntries(entries: RDD[MatrixEntry], scale: Double = 1.0): RDD[((Long, Long), Double)] = {
+      entries.map { case MatrixEntry(i, j, v) => ((i, j), v * scale) }
+    }
+
+    private def splitQuadrants(entries: RDD[MatrixEntry], m: Int): CoordinateQuadrants = {
+      val E = new CoordinateMatrix(entries.filter(x => x.i < m && x.j < m)).setName("E")
+      val F = new CoordinateMatrix(entries.filter(x => x.i < m && x.j >= m)
+        .map { case MatrixEntry(i, j, v) => MatrixEntry(i, j - m, v) }).setName("F")
+      val G = new CoordinateMatrix(entries.filter(x => x.i >= m && x.j < m)
+        .map { case MatrixEntry(i, j, v) => MatrixEntry(i - m, j, v) }).setName("G")
+      val H = new CoordinateMatrix(entries.filter(x => x.i >= m && x.j >= m)
+        .map { case MatrixEntry(i, j, v) => MatrixEntry(i - m, j - m, v) }).setName("H")
+
+      CoordinateQuadrants(E, F, G, H)
+    }
+
+    private def shiftAndScaleEntries(
+      entries: RDD[MatrixEntry],
+      rowOffset: Int = 0,
+      colOffset: Int = 0,
+      scale: Double = 1.0): RDD[MatrixEntry] = {
+      if (rowOffset == 0 && colOffset == 0 && scale == 1.0) {
+        entries
+      } else {
+        entries.map { case MatrixEntry(i, j, v) =>
+          MatrixEntry(i + rowOffset, j + colOffset, v * scale)
+        }
+      }
+    }
+
+    private def invertPartition(
+      partition: CoordinateMatrix,
+      partitionSize: Int,
+      limit: Int,
+      useCheckpoints: Boolean,
+      depth: Int,
+      name: String,
+      perf: RecursivePerfConfig): CoordinateMatrix = {
+      val inv = if (partitionSize > limit) {
+        partition.inverse(limit, useCheckpoints, depth = depth + 1, perf)
+      } else {
+        partition.localInv()
+      }
+      val named = inv.setName(name)
+      persistAndTrack(named, useCheckpoints)
+      named
     }
 
     /**
@@ -531,6 +852,7 @@ object Inverse {
 
     /**
      * Computes the matrix inverse by collecting to the driver and using LU factorization.
+     * Uses Breeze dense inverse on the collected local matrix.
      * Should be used for relatively small CoordinateMatrices (the base case of recursive inversion).
      *
      * @return Inverted CoordinateMatrix
@@ -572,79 +894,58 @@ object Inverse {
      * @return BlockMatrix
      */
     def inverse(limit: Int, useCheckpoints: Boolean = true, depth: Int = 0): CoordinateMatrix = {
+      inverse(limit, useCheckpoints, depth, RecursivePerfConfig())
+    }
 
-      require(!useCheckpoints || matrix.entries.sparkContext.getCheckpointDir.isDefined, "Checkpointing dir has to be set when useCheckpoints=true!")
-      require(matrix.numRows() == matrix.numCols(), "Matrix has to be square!")
+    def inverse(limit: Int, useCheckpoints: Boolean, depth: Int, perf: RecursivePerfConfig): CoordinateMatrix = {
+      validateInverseInputs(useCheckpoints)
       val numCols = matrix.numCols()
       val m = ((numCols + 1) / 2).toInt
       val entries: RDD[MatrixEntry] = matrix.entries
       val numParts = (matrix.entries.getNumPartitions).toInt
 
+      trace(perf.trace, s"[perf][recursive-coo] depth=$depth inputParts=${matrix.entries.getNumPartitions}")
       println("Input matrix shape: " + matrix.numRows() + ", " + matrix.numCols() + " At depth=" + depth)
 
-      // split into block partitions and readjust the block indices
-      val E = new CoordinateMatrix(entries.filter(x => x.i < m && x.j < m))
-        .setName("E")
-      val F = new CoordinateMatrix(entries.filter(x => x.i < m && x.j >= m)
-        .map { case MatrixEntry(i, j, matrix) => MatrixEntry(i, j - m, matrix) })
-        .setName("F")
-      val G = new CoordinateMatrix(entries.filter(x => x.i >= m && x.j < m)
-        .map { case MatrixEntry(i, j, matrix) => MatrixEntry(i - m, j, matrix) })
-        .setName("G")
-      val H = new CoordinateMatrix(entries.filter(x => x.i >= m && x.j >= m)
-        .map { case MatrixEntry(i, j, matrix) => MatrixEntry(i - m, j - m, matrix) })
-        .setName("H")
+      val CoordinateQuadrants(e, f, g, h) = splitQuadrants(entries, m)
 
-      persistAndTrack(E, useCheckpoints)
-      persistAndTrack(F, useCheckpoints)
-      persistAndTrack(G, useCheckpoints)
-      persistAndTrack(H, useCheckpoints)
+      persistAndTrack(e, useCheckpoints)
+      persistAndTrack(f, useCheckpoints)
+      persistAndTrack(g, useCheckpoints)
+      persistAndTrack(h, useCheckpoints)
 
-      val E_inv = if (m > limit) {
-        E.inverse(limit, useCheckpoints, depth = depth + 1)
-      } else {
-        E.localInv()
-      }.setName("E_inv")
+      val E_inv = timed(perf.trace, s"[perf][recursive-coo] depth=$depth E inverse") {
+        invertPartition(e, m, limit, useCheckpoints, depth, "E_inv", perf)
+      }
 
-      persistAndTrack(E_inv, useCheckpoints)
-
-      val GE_inv = G.multiply(E_inv).setName("GE_inv")
-      val E_invF = E_inv.multiply(F).setName("E_invF")
+      val GE_inv = g.multiply(E_inv).setName("GE_inv")
+      val E_invF = E_inv.multiply(f).setName("E_invF")
 
       persistAndTrack(GE_inv, useCheckpoints)
       persistAndTrack(E_invF, useCheckpoints)
 
-      val S = H.subtract(G.multiply(E_invF)).setName("S")
+      val S = h.subtract(g.multiply(E_invF)).setName("S")
       persistAndTrack(S, useCheckpoints)
 
-      val S_inv = if (m > limit) {
-        S.inverse(limit, useCheckpoints, depth = depth + 1)
-      } else {
-        S.localInv()
-      }.setName("S_inv")
-
-      persistAndTrack(S_inv, useCheckpoints)
+      val S_inv = timed(perf.trace, s"[perf][recursive-coo] depth=$depth S inverse") {
+        invertPartition(S, m, limit, useCheckpoints, depth, "S_inv", perf)
+      }
 
       val S_invGE_inv = S_inv.multiply(GE_inv).setName("S_invGE_inv")
       val E_invFS_inv = E_invF.multiply(S_inv).setName("E_invFS_inv")
       persistAndTrack(S_invGE_inv, useCheckpoints)
       persistAndTrack(E_invFS_inv, useCheckpoints)
 
-      val top_left = E_inv.add(E_invFS_inv.multiply(GE_inv)).entries
-
-      // Readjust the block indices
-      val top_right = E_invFS_inv.entries.map {
-        case MatrixEntry(i, j, v) => MatrixEntry(i, j + m, -v)
-      }
-      val bottom_left = S_invGE_inv.entries.map {
-        case MatrixEntry(i, j, v) => MatrixEntry(i + m, j, -v)
-      }
-      val bottom_right = S_inv.entries.map {
-        case MatrixEntry(i, j, v) => MatrixEntry(i + m, j + m, v)
-      }
-      val sc = top_left.sparkContext
-      val all_blocks = sc.union(top_left, top_right, bottom_left, bottom_right)
-        .coalesce(numParts)
+      val topLeft = E_inv.add(E_invFS_inv.multiply(GE_inv))
+      val sc = topLeft.entries.sparkContext
+      val unionedEntries = sc.union(
+        topLeft.entries,
+        shiftAndScaleEntries(E_invFS_inv.entries, colOffset = m, scale = -1.0),
+        shiftAndScaleEntries(S_invGE_inv.entries, rowOffset = m, scale = -1.0),
+        shiftAndScaleEntries(S_inv.entries, rowOffset = m, colOffset = m))
+      val defaultOutputParts = math.max(numParts, math.min(unionedEntries.getNumPartitions, numParts * 2))
+      val outputParts = perf.targetOutputPartitions.getOrElse(defaultOutputParts)
+      val all_blocks = maybeCoalesceNoShuffle(unionedEntries, outputParts, perf.unionCoalesceThreshold)
 
       val cm = new CoordinateMatrix(all_blocks, matrix.numRows(), matrix.numCols())
       if (useCheckpoints) {
@@ -715,26 +1016,49 @@ object Inverse {
      */
     def iterativeInverse(maxIter: Int = 30, tolerance: Double = 1e-10,
                          useCheckpoints: Boolean = true, checkpointInterval: Int = 5): CoordinateMatrix = {
+      iterativeInverse(
+        maxIter,
+        tolerance,
+        useCheckpoints,
+        checkpointInterval,
+        IterativePerfConfig(
+          persistLevel = iterativeStorageLevel,
+          checkpointEvery = checkpointInterval,
+          useLocalCheckpoint = false,
+          trace = false))
+    }
+
+    def iterativeInverse(
+      maxIter: Int,
+      tolerance: Double,
+      useCheckpoints: Boolean,
+      checkpointInterval: Int,
+      perf: IterativePerfConfig): CoordinateMatrix = {
       require(!useCheckpoints || matrix.entries.sparkContext.getCheckpointDir.isDefined,
         "Checkpointing dir has to be set when useCheckpoints=true!")
       require(matrix.numRows() == matrix.numCols(), "Matrix has to be square!")
+      val storageLevel = perf.persistLevel
+      val effectiveCheckpointEvery = effectiveIterativeCheckpointEvery(perf)
+      if (perf.checkpointEvery != checkpointInterval) {
+        trace(perf.trace, s"[perf][iterative-coo] using checkpointEvery=${perf.checkpointEvery} (requested=$checkpointInterval)")
+      }
 
       val shouldPersistInput = matrix.entries.getStorageLevel == StorageLevel.NONE
       if (shouldPersistInput) {
-        matrix.entries.persist(iterativeStorageLevel)
+        matrix.entries.persist(storageLevel)
       }
 
       val n = matrix.numRows()
-      val norm1 = matrix.normOne()
-      val normInfVal = matrix.normInf()
+      val norm1 = timed(perf.trace, "[perf][iterative-coo] ||A||_1") { matrix.normOne() }
+      val normInfVal = timed(perf.trace, "[perf][iterative-coo] ||A||_inf") { matrix.normInf() }
       val alpha = 1.0 / (norm1 * normInfVal)
 
       println(s"iterativeInverse: n=$n, ||A||_1=$norm1, ||A||_inf=$normInfVal, alpha=$alpha")
 
       // X_0 = alpha * A^T
       var X = matrix.transpose().scalarMultiply(alpha)
-      X.entries.persist(iterativeStorageLevel)
-      if (useCheckpoints) X.checkpoint()
+      X.entries.persist(storageLevel)
+      maybeCheckpoint(X.entries, useCheckpoints, perf.useLocalCheckpoint)
 
       val eye = createEye(n, 1.0)
       val twoEye = createEye(n, 2.0)
@@ -745,10 +1069,11 @@ object Inverse {
         iter += 1
 
         // AX = A * X_k — computed once, reused for both the update and the convergence check.
-        val AX = matrix.multiply(X)
-        AX.entries.persist(iterativeStorageLevel)
+        val AX = timed(perf.trace, s"[perf][iterative-coo] iter=$iter AX") { matrix.multiply(X) }
+        AX.entries.persist(storageLevel)
 
-        val frobSq = eye.subtract(AX).frobeniusNormSquared()
+        val residual = eye.subtract(AX)
+        val frobSq = residual.frobeniusNormSquared()
         val metric = math.sqrt(frobSq) / n
         println(s"iterativeInverse iter=$iter: ||I - A*X||_F / n = $metric")
         if (metric < tolerance) {
@@ -758,13 +1083,16 @@ object Inverse {
         if (!converged) {
           // X_{k+1} = X_k * (2I - A * X_k)
           val twoI_minus_AX = twoEye.subtract(AX)
-          val X_new = X.multiply(twoI_minus_AX)
+          val X_new = timed(perf.trace, s"[perf][iterative-coo] iter=$iter X update") { X.multiply(twoI_minus_AX) }
 
           val oldX = X
           X = X_new
-          X.entries.persist(iterativeStorageLevel)
-          if (useCheckpoints && iter % checkpointInterval == 0) X.checkpoint()
-          X.entries.count()
+          X.entries.persist(storageLevel)
+          if (iter % effectiveCheckpointEvery == 0) {
+            maybeCheckpoint(X.entries, useCheckpoints, perf.useLocalCheckpoint)
+            // Only force materialization when checkpointing to avoid an extra job every iteration.
+            X.entries.count()
+          }
           oldX.entries.unpersist(true)
         }
 
@@ -790,8 +1118,7 @@ object Inverse {
      * @return Diagonal BlockMatrix
      */
     private def createEye(n: Long, value: Double = 1.0): CoordinateMatrix = {
-      val eyeMaybe = eyeCoordinateMatrixMap.get((n, value))
-      if (eyeMaybe.isEmpty) {
+      eyeCoordinateMatrixMap.getOrElseUpdate((n, value), {
         val sc = matrix.entries.sparkContext
         val diagonal = sc.range(start = 0, end = n)
           .map {
@@ -802,39 +1129,45 @@ object Inverse {
         var cm = new CoordinateMatrix(diagonal, n, n)
         cm = cm.setName("eye_" + (n, value))
         cm.entries.persist(iterativeStorageLevel)
-        eyeCoordinateMatrixMap.put((n, value), cm)
         cm
-      } else {
-        eyeMaybe.get
-      }
+      })
     }
 
     def multiply(other: CoordinateMatrix): CoordinateMatrix = {
-
-      val M_ = matrix.entries
+      val partitioner = new HashPartitioner(estimatedPartitionCountFor(other))
+      val leftByMid = matrix.entries
         .map({ case MatrixEntry(i, j, v) => (j, (i, v)) })
-      val N_ = other.entries
+        .partitionBy(partitioner)
+      val rightByMid = other.entries
         .map({ case MatrixEntry(j, k, w) => (j, (k, w)) })
-      val productEntries = M_
-        .join(N_)
+        .partitionBy(partitioner)
+      val productEntries = leftByMid
+        .join(rightByMid)
         .map({ case (_, ((i, v), (k, w))) => ((i, k), (v * w)) })
-        .reduceByKey(_ + _)
+        .reduceByKey(partitioner, _ + _)
+        .filter { case (_, sum) => sum != 0.0 }
         .map({ case ((i, k), sum) => MatrixEntry(i, k, sum) })
-      new CoordinateMatrix(productEntries)
+      new CoordinateMatrix(productEntries, matrix.numRows(), other.numCols())
     }
 
     def add(other: CoordinateMatrix): CoordinateMatrix = {
-      val entries = matrix.entries.map { case MatrixEntry(i, j, v) => ((i, j), v) }
-        .union(other.entries.map { case MatrixEntry(i, j, v) => ((i, j), v) })
-        .reduceByKey(_ + _)
+      val partitioner = new HashPartitioner(estimatedPartitionCountFor(other))
+      val entries = keyedEntries(matrix.entries)
+        .partitionBy(partitioner)
+        .union(keyedEntries(other.entries).partitionBy(partitioner))
+        .reduceByKey(partitioner, _ + _)
+        .filter { case (_, sum) => sum != 0.0 }
         .map { case ((i, j), v) => MatrixEntry(i, j, v) }
       new CoordinateMatrix(entries, matrix.numRows(), matrix.numCols())
     }
 
     def subtract(other: CoordinateMatrix): CoordinateMatrix = {
-      val entries = matrix.entries.map { case MatrixEntry(i, j, v) => ((i, j), v) }
-        .union(other.entries.map { case MatrixEntry(i, j, v) => ((i, j), -v) })
-        .reduceByKey(_ + _)
+      val partitioner = new HashPartitioner(estimatedPartitionCountFor(other))
+      val entries = keyedEntries(matrix.entries)
+        .partitionBy(partitioner)
+        .union(keyedEntries(other.entries, scale = -1.0).partitionBy(partitioner))
+        .reduceByKey(partitioner, _ + _)
+        .filter { case (_, sum) => sum != 0.0 }
         .map { case ((i, j), v) => MatrixEntry(i, j, v) }
       new CoordinateMatrix(entries, matrix.numRows(), matrix.numCols())
     }
@@ -853,22 +1186,82 @@ object Inverse {
 
     def leftPseudoInverse(limit: Int): CoordinateMatrix = {
       val at = matrix.transpose()
-      at.multiply(matrix).inverse(limit).multiply(at)
+      val persistedAt = persistIfNeeded(at.entries, iterativeStorageLevel)
+      try {
+        val gram = at.multiply(matrix)
+        val persistedGram = persistIfNeeded(gram.entries, iterativeStorageLevel)
+        try {
+          gram.inverse(limit).multiply(at)
+        } finally {
+          if (persistedGram) {
+            gram.entries.unpersist(false)
+          }
+        }
+      } finally {
+        if (persistedAt) {
+          at.entries.unpersist(false)
+        }
+      }
     }
 
     def leftPseudoInverse(): CoordinateMatrix = {
       val at = matrix.transpose()
-      at.multiply(matrix).inverse().multiply(at)
+      val persistedAt = persistIfNeeded(at.entries, iterativeStorageLevel)
+      try {
+        val gram = at.multiply(matrix)
+        val persistedGram = persistIfNeeded(gram.entries, iterativeStorageLevel)
+        try {
+          gram.inverse().multiply(at)
+        } finally {
+          if (persistedGram) {
+            gram.entries.unpersist(false)
+          }
+        }
+      } finally {
+        if (persistedAt) {
+          at.entries.unpersist(false)
+        }
+      }
     }
 
     def rightPseudoInverse(limit: Int): CoordinateMatrix = {
       val at = matrix.transpose()
-      at.multiply(matrix.multiply(at).inverse(limit))
+      val persistedAt = persistIfNeeded(at.entries, iterativeStorageLevel)
+      try {
+        val gram = matrix.multiply(at)
+        val persistedGram = persistIfNeeded(gram.entries, iterativeStorageLevel)
+        try {
+          at.multiply(gram.inverse(limit))
+        } finally {
+          if (persistedGram) {
+            gram.entries.unpersist(false)
+          }
+        }
+      } finally {
+        if (persistedAt) {
+          at.entries.unpersist(false)
+        }
+      }
     }
 
     def rightPseudoInverse(): CoordinateMatrix = {
       val at = matrix.transpose()
-      at.multiply(matrix.multiply(at).inverse())
+      val persistedAt = persistIfNeeded(at.entries, iterativeStorageLevel)
+      try {
+        val gram = matrix.multiply(at)
+        val persistedGram = persistIfNeeded(gram.entries, iterativeStorageLevel)
+        try {
+          at.multiply(gram.inverse())
+        } finally {
+          if (persistedGram) {
+            gram.entries.unpersist(false)
+          }
+        }
+      } finally {
+        if (persistedAt) {
+          at.entries.unpersist(false)
+        }
+      }
     }
 
     def setName(name: String): CoordinateMatrix = {

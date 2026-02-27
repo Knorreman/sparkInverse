@@ -7,9 +7,7 @@ val sparkVersion = "4.1.1"
 libraryDependencies += "org.apache.spark" %% "spark-core" % sparkVersion
 // https://mvnrepository.com/artifact/org.apache.spark/spark-sql
 libraryDependencies += "org.apache.spark" %% "spark-mllib" % sparkVersion
-libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.15" % Test
-// https://mvnrepository.com/artifact/dev.ludovic.netlib/lapack
-libraryDependencies += "dev.ludovic.netlib" % "lapack" % "3.0.3"
+libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.19" % Test
 
 lazy val root = (project in file("."))
   .settings(
@@ -27,6 +25,22 @@ lazy val root = (project in file("."))
       "-Dspark.driver.memory=8g",
       "-Dspark.executor.memory=8g"
     ),
+    run / envVars ++= {
+      val threads = sys.props.getOrElse("sparkInverse.openblasThreads", "1")
+      Map(
+        "OPENBLAS_NUM_THREADS" -> threads,
+        "OMP_NUM_THREADS" -> threads,
+        "GOTO_NUM_THREADS" -> threads
+      )
+    },
+    Test / envVars ++= {
+      val threads = sys.props.getOrElse("sparkInverse.openblasThreads", "1")
+      Map(
+        "OPENBLAS_NUM_THREADS" -> threads,
+        "OMP_NUM_THREADS" -> threads,
+        "GOTO_NUM_THREADS" -> threads
+      )
+    },
     Test / fork := true,
     run / fork := true
   )
