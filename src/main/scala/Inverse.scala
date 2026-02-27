@@ -25,8 +25,7 @@ object Inverse {
   }
 
   /**
-   * Invert an n×n matrix stored in column-major order using LU factorization with partial pivoting.
-   * Pure JVM — no native BLAS/LAPACK dependency.
+   * Invert an n×n matrix using LAPACK dgetrf (LU factorization) + dgetri (inversion from LU).
    *
    * @param data Column-major array of length n*n (not modified)
    * @param n    Matrix dimension
@@ -34,119 +33,18 @@ object Inverse {
    */
   private[Inverse] def luInverse(data: Array[Double], n: Int): Array[Double] = {
     val a = data.clone()
-    val inv = Array.ofDim[Double](n * n)
-
-    var i = 0
-    while (i < n) {
-      inv(i + i * n) = 1.0
-      i += 1
-    }
-
-    var k = 0
-    while (k < n) {
-      var maxRow = k
-      var maxVal = math.abs(a(k + k * n))
-      i = k + 1
-      while (i < n) {
-        val v = math.abs(a(i + k * n))
-        if (v > maxVal) {
-          maxVal = v
-          maxRow = i
-        }
-        i += 1
-      }
-
-      if (maxRow != k) {
-        var j = 0
-        while (j < n) {
-          val kIdx = k + j * n
-          val maxIdx = maxRow + j * n
-          val tmpA = a(kIdx)
-          a(kIdx) = a(maxIdx)
-          a(maxIdx) = tmpA
-
-          val tmpInv = inv(kIdx)
-          inv(kIdx) = inv(maxIdx)
-          inv(maxIdx) = tmpInv
-          j += 1
-        }
-      }
-
-      val diag = a(k + k * n)
-      require(math.abs(diag) > 1e-300, s"luInverse: singular matrix (zero pivot at column $k)")
-
-      i = k + 1
-      while (i < n) {
-        val ik = i + k * n
-        val factor = a(ik) / diag
-        a(ik) = factor
-
-        var j = k + 1
-        while (j < n) {
-          a(i + j * n) -= factor * a(k + j * n)
-          j += 1
-        }
-
-        j = 0
-        while (j < n) {
-          inv(i + j * n) -= factor * inv(k + j * n)
-          j += 1
-        }
-        i += 1
-      }
-
-      k += 1
-    }
-
-    var j = 0
-    while (j < n) {
-      k = n - 1
-      while (k >= 0) {
-        val kk = k + k * n
-        val kj = k + j * n
-        inv(kj) /= a(kk)
-        val xk = inv(kj)
-
-        i = 0
-        while (i < k) {
-          inv(i + j * n) -= a(i + k * n) * xk
-          i += 1
-        }
-
-        k -= 1
-      }
-      j += 1
-    }
-
-    inv
-  }
-
-  /**
-   * Invert an n×n matrix using LAPACK dgetrf (LU factorization) + dgetri (inversion from LU).
-   * Uses native BLAS/LAPACK if available, falls back to F2J otherwise.
-   *
-   * @param data Column-major array of length n*n (not modified)
-   * @param n    Matrix dimension
-   * @return Column-major array of length n*n containing the inverse
-   */
-  private[Inverse] def lapackInverse(data: Array[Double], n: Int): Array[Double] = {
-    val a = data.clone()
     val ipiv = new Array[Int](n)
     val info = new intW(0)
-
     val lapack = JavaLAPACK.getInstance()
 
     lapack.dgetrf(n, n, a, n, ipiv, info)
-    require(info.`val` == 0, s"lapackInverse: dgetrf failed (info=${info.`val`})")
+    require(info.`val` == 0, s"luInverse: singular matrix (dgetrf info=${info.`val`})")
 
-    // Query optimal workspace size
     val lworkQuery = new Array[Double](1)
     lapack.dgetri(n, a, n, ipiv, lworkQuery, -1, info)
-    val lwork = lworkQuery(0).toInt.max(1)
-
-    val work = new Array[Double](lwork)
-    lapack.dgetri(n, a, n, ipiv, work, lwork, info)
-    require(info.`val` == 0, s"lapackInverse: dgetri failed (info=${info.`val`})")
+    val work = new Array[Double](lworkQuery(0).toInt.max(1))
+    lapack.dgetri(n, a, n, ipiv, work, work.length, info)
+    require(info.`val` == 0, s"luInverse: dgetri failed (info=${info.`val`})")
 
     a
   }
@@ -250,18 +148,6 @@ object Inverse {
     }
 
     /**
-     * Like localInv but uses LAPACK dgetrf+dgetri instead of the pure-JVM LU solver.
-     */
-    def lapackLocalInv(): BlockMatrix = {
-      val colsPerBlock = matrix.colsPerBlock
-      val rowsPerBlock = matrix.rowsPerBlock
-      val localMat = matrix.toLocalMatrix()
-      val n = localMat.numRows
-      val invData = lapackInverse(localMat.toArray, n)
-      localDenseToBlockMatrix(invData, n, rowsPerBlock, colsPerBlock)
-    }
-
-    /**
      * Return the negative of this [[BlockMatrix]].
      * A.negative() = -A
      *
@@ -290,7 +176,7 @@ object Inverse {
      *                        performance benefits since the lineage can get very large.
      * @return BlockMatrix
      */
-    def inverse(limit: Int, numMidDimSplits: Int, useCheckpoints: Boolean = true, depth: Int = 0, useLapack: Boolean = false): BlockMatrix = {
+    def inverse(limit: Int, numMidDimSplits: Int, useCheckpoints: Boolean = true, depth: Int = 0): BlockMatrix = {
 
       require(!useCheckpoints || matrix.blocks.sparkContext.getCheckpointDir.isDefined, "Checkpointing dir has to be set when useCheckpoints=true!")
       require(matrix.numRows() == matrix.numCols(), "Matrix has to be square!")
@@ -327,9 +213,9 @@ object Inverse {
 
       val recurseThresholdInBlocks = math.max(1, limit / colsPerBlock)
       val E_inv = if (m > recurseThresholdInBlocks) {
-        E.inverse(limit, numMidDimSplits, useCheckpoints, depth = depth + 1, useLapack = useLapack)
+        E.inverse(limit, numMidDimSplits, useCheckpoints, depth = depth + 1)
       } else {
-        if (useLapack) E.lapackLocalInv() else E.localInv()
+        E.localInv()
       }.setName("E_inv")
 
       persistAndTrack(E_inv, useCheckpoints)
@@ -344,9 +230,9 @@ object Inverse {
       persistAndTrack(S, useCheckpoints)
 
       val S_inv = if (m > recurseThresholdInBlocks) {
-        S.inverse(limit, numMidDimSplits, useCheckpoints, depth = depth + 1, useLapack = useLapack)
+        S.inverse(limit, numMidDimSplits, useCheckpoints, depth = depth + 1)
       } else {
-        if (useLapack) S.lapackLocalInv() else S.localInv()
+        S.localInv()
       }.setName("S_inv")
 
       persistAndTrack(S_inv, useCheckpoints)

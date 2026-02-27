@@ -9,7 +9,6 @@ object Main {
   case class BenchResult(n: Int, schurBlockSize: Int, nsBlockSize: Int, schurLimit: Int,
                          schurMidSplits: Int, nsMidSplits: Int,
                          schurTimeSec: Double, schurRmse: Double,
-                         schurLapackTimeSec: Double, schurLapackRmse: Double,
                          iterTimeSec: Double, iterRmse: Double, iterIters: Int)
 
   /**
@@ -76,8 +75,8 @@ object Main {
     println(s"  schurMidSplits=$schurMidSplits  nsMidSplits=$nsMidSplits")
     println(s"${"=" * 60}")
 
-    // --- Schur complement with pure-JVM LU base case ---
-    println("\n[Schur complement / LU base case]")
+    // --- Schur complement recursive inversion ---
+    println("\n[Schur complement recursive inversion]")
     val mat1 = buildMatrix(sc, n, schurBlockSize, seed = 42)
     val t1 = System.nanoTime()
     val inv1 = mat1.inverse(schurLimit, schurMidSplits)
@@ -86,17 +85,6 @@ object Main {
     println(f"  time=${schurTime}%.2fs  RMSE=$schurRmse%.3e")
     mat1.blocks.unpersist(true)
     inv1.blocks.unpersist(true)
-
-    // --- Schur complement with LAPACK base case ---
-    println("\n[Schur complement / LAPACK base case]")
-    val mat1b = buildMatrix(sc, n, schurBlockSize, seed = 42)
-    val t1b = System.nanoTime()
-    val inv1b = mat1b.inverse(schurLimit, schurMidSplits, useLapack = true)
-    val schurLapackTime = (System.nanoTime() - t1b) / 1e9
-    val schurLapackRmse = computeRmse(mat1b, inv1b, schurMidSplits)
-    println(f"  time=${schurLapackTime}%.2fs  RMSE=$schurLapackRmse%.3e")
-    mat1b.blocks.unpersist(true)
-    inv1b.blocks.unpersist(true)
 
     // --- Newton-Schulz (larger blockSize = fewer, bigger Spark tasks = less overhead) ---
     println("\n[Newton-Schulz iterative inversion]")
@@ -110,19 +98,18 @@ object Main {
     inv2.blocks.unpersist(true)
 
     BenchResult(n, schurBlockSize, nsBlockSize, schurLimit, schurMidSplits, nsMidSplits,
-      schurTime, schurRmse, schurLapackTime, schurLapackRmse, iterTime, iterRmse, 0)
+      schurTime, schurRmse, iterTime, iterRmse, 0)
   }
 
   def printTable(results: Seq[BenchResult]): Unit = {
-    val w = 130
-    println("\n" + "=" * w)
-    println(f"  ${"n"}%6s  ${"sBsz"}%5s  ${"nBsz"}%5s  ${"sSplit"}%6s  ${"nSplit"}%6s  | ${"Schur/LU(s)"}%12s  ${"LU RMSE"}%10s  | ${"Schur/LAPACK(s)"}%16s  ${"LAPACK RMSE"}%12s  ${"LU/LP speedup"}%14s  | ${"N-S(s)"}%8s  ${"N-S RMSE"}%10s")
-    println("-" * w)
+    println("\n" + "=" * 100)
+    println(f"  ${"n"}%6s  ${"sBsz"}%5s  ${"nBsz"}%5s  ${"sSplit"}%6s  ${"nSplit"}%6s  | ${"Schur time(s)"}%14s  ${"Schur RMSE"}%12s  | ${"N-S time(s)"}%12s  ${"N-S RMSE"}%10s  ${"Speedup"}%8s")
+    println("-" * 100)
     for (r <- results) {
-      val luVsLapack = r.schurTimeSec / r.schurLapackTimeSec
-      println(f"  ${r.n}%6d  ${r.schurBlockSize}%5d  ${r.nsBlockSize}%5d  ${r.schurMidSplits}%6d  ${r.nsMidSplits}%6d  | ${r.schurTimeSec}%12.2f  ${r.schurRmse}%10.3e  | ${r.schurLapackTimeSec}%16.2f  ${r.schurLapackRmse}%12.3e  ${luVsLapack}%14.2fx  | ${r.iterTimeSec}%8.2f  ${r.iterRmse}%10.3e")
+      val speedup = r.schurTimeSec / r.iterTimeSec
+      println(f"  ${r.n}%6d  ${r.schurBlockSize}%5d  ${r.nsBlockSize}%5d  ${r.schurMidSplits}%6d  ${r.nsMidSplits}%6d  | ${r.schurTimeSec}%14.2f  ${r.schurRmse}%12.3e  | ${r.iterTimeSec}%12.2f  ${r.iterRmse}%10.3e  ${speedup}%8.2fx")
     }
-    println("=" * w)
+    println("=" * 100)
   }
 
   def main(args: Array[String]): Unit = {
