@@ -176,7 +176,7 @@ object Inverse {
      *                        performance benefits since the lineage can get very large.
      * @return BlockMatrix
      */
-    def inverse(limit: Int, numMidDimSplits: Int, useCheckpoints: Boolean = true, depth: Int = 0, useNSBase: Boolean = false): BlockMatrix = {
+    def inverse(limit: Int, numMidDimSplits: Int, useCheckpoints: Boolean = true, depth: Int = 0): BlockMatrix = {
 
       require(!useCheckpoints || matrix.blocks.sparkContext.getCheckpointDir.isDefined, "Checkpointing dir has to be set when useCheckpoints=true!")
       require(matrix.numRows() == matrix.numCols(), "Matrix has to be square!")
@@ -213,10 +213,9 @@ object Inverse {
 
       val recurseThresholdInBlocks = math.max(1, limit / colsPerBlock)
       val E_inv = if (m > recurseThresholdInBlocks) {
-        E.inverse(limit, numMidDimSplits, useCheckpoints, depth = depth + 1, useNSBase = useNSBase)
+        E.inverse(limit, numMidDimSplits, useCheckpoints, depth = depth + 1)
       } else {
-        if (useNSBase) E.iterativeInverse(useCheckpoints = useCheckpoints, numMidDimSplits = numMidDimSplits)
-        else E.localInv()
+        E.localInv()
       }.setName("E_inv")
 
       persistAndTrack(E_inv, useCheckpoints)
@@ -231,10 +230,9 @@ object Inverse {
       persistAndTrack(S, useCheckpoints)
 
       val S_inv = if (m > recurseThresholdInBlocks) {
-        S.inverse(limit, numMidDimSplits, useCheckpoints, depth = depth + 1, useNSBase = useNSBase)
+        S.inverse(limit, numMidDimSplits, useCheckpoints, depth = depth + 1)
       } else {
-        if (useNSBase) S.iterativeInverse(useCheckpoints = useCheckpoints, numMidDimSplits = numMidDimSplits)
-        else S.localInv()
+        S.localInv()
       }.setName("S_inv")
 
       persistAndTrack(S_inv, useCheckpoints)
