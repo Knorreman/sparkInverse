@@ -7,6 +7,8 @@ import scala.collection.mutable.ListBuffer
 import org.apache.spark.Partitioner
 import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
+import dev.ludovic.netlib.lapack.JavaLAPACK
+import org.netlib.util.intW
 
 object Inverse {
   private val eyeBlockMatrixMap: mutable.Map[(Long, Double, Int, Int), BlockMatrix] = mutable.Map[(Long, Double, Int, Int), BlockMatrix]()
@@ -119,6 +121,36 @@ object Inverse {
     inv
   }
 
+  /**
+   * Invert an n×n matrix using LAPACK dgetrf (LU factorization) + dgetri (inversion from LU).
+   * Uses native BLAS/LAPACK if available, falls back to F2J otherwise.
+   *
+   * @param data Column-major array of length n*n (not modified)
+   * @param n    Matrix dimension
+   * @return Column-major array of length n*n containing the inverse
+   */
+  private[Inverse] def lapackInverse(data: Array[Double], n: Int): Array[Double] = {
+    val a = data.clone()
+    val ipiv = new Array[Int](n)
+    val info = new intW(0)
+
+    val lapack = JavaLAPACK.getInstance()
+
+    lapack.dgetrf(n, n, a, n, ipiv, info)
+    require(info.`val` == 0, s"lapackInverse: dgetrf failed (info=${info.`val`})")
+
+    // Query optimal workspace size
+    val lworkQuery = new Array[Double](1)
+    lapack.dgetri(n, a, n, ipiv, lworkQuery, -1, info)
+    val lwork = lworkQuery(0).toInt.max(1)
+
+    val work = new Array[Double](lwork)
+    lapack.dgetri(n, a, n, ipiv, work, lwork, info)
+    require(info.`val` == 0, s"lapackInverse: dgetri failed (info=${info.`val`})")
+
+    a
+  }
+
   implicit class BlockMatrixInverse(val matrix: BlockMatrix) {
 
     private val iterativeStorageLevel = StorageLevel.MEMORY_AND_DISK_SER
@@ -218,6 +250,18 @@ object Inverse {
     }
 
     /**
+     * Like localInv but uses LAPACK dgetrf+dgetri instead of the pure-JVM LU solver.
+     */
+    def lapackLocalInv(): BlockMatrix = {
+      val colsPerBlock = matrix.colsPerBlock
+      val rowsPerBlock = matrix.rowsPerBlock
+      val localMat = matrix.toLocalMatrix()
+      val n = localMat.numRows
+      val invData = lapackInverse(localMat.toArray, n)
+      localDenseToBlockMatrix(invData, n, rowsPerBlock, colsPerBlock)
+    }
+
+    /**
      * Return the negative of this [[BlockMatrix]].
      * A.negative() = -A
      *
@@ -246,7 +290,7 @@ object Inverse {
      *                        performance benefits since the lineage can get very large.
      * @return BlockMatrix
      */
-    def inverse(limit: Int, numMidDimSplits: Int, useCheckpoints: Boolean = true, depth: Int = 0): BlockMatrix = {
+    def inverse(limit: Int, numMidDimSplits: Int, useCheckpoints: Boolean = true, depth: Int = 0, useLapack: Boolean = false): BlockMatrix = {
 
       require(!useCheckpoints || matrix.blocks.sparkContext.getCheckpointDir.isDefined, "Checkpointing dir has to be set when useCheckpoints=true!")
       require(matrix.numRows() == matrix.numCols(), "Matrix has to be square!")
@@ -283,9 +327,9 @@ object Inverse {
 
       val recurseThresholdInBlocks = math.max(1, limit / colsPerBlock)
       val E_inv = if (m > recurseThresholdInBlocks) {
-        E.inverse(limit, numMidDimSplits, useCheckpoints, depth = depth + 1)
+        E.inverse(limit, numMidDimSplits, useCheckpoints, depth = depth + 1, useLapack = useLapack)
       } else {
-        E.localInv()
+        if (useLapack) E.lapackLocalInv() else E.localInv()
       }.setName("E_inv")
 
       persistAndTrack(E_inv, useCheckpoints)
@@ -300,9 +344,9 @@ object Inverse {
       persistAndTrack(S, useCheckpoints)
 
       val S_inv = if (m > recurseThresholdInBlocks) {
-        S.inverse(limit, numMidDimSplits, useCheckpoints, depth = depth + 1)
+        S.inverse(limit, numMidDimSplits, useCheckpoints, depth = depth + 1, useLapack = useLapack)
       } else {
-        S.localInv()
+        if (useLapack) S.lapackLocalInv() else S.localInv()
       }.setName("S_inv")
 
       persistAndTrack(S_inv, useCheckpoints)
