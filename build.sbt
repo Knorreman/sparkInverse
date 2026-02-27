@@ -13,5 +13,20 @@ libraryDependencies += "dev.ludovic.netlib" % "lapack" % "3.0.3"
 
 lazy val root = (project in file("."))
   .settings(
-    name := "sparkInverse"
+    name := "sparkInverse",
+    javaOptions ++= Seq(
+      "--add-opens=java.base/java.nio=ALL-UNNAMED",
+      "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
+      "--add-opens=java.base/java.lang=ALL-UNNAMED",
+      "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",
+      "--add-opens=java.base/java.util=ALL-UNNAMED"
+    ),
+    Test / javaOptions += "-Xmx8g",
+    run / javaOptions ++= Seq(
+      "-Xmx8g",
+      "-Dspark.driver.memory=8g",
+      "-Dspark.executor.memory=8g"
+    ),
+    Test / fork := true,
+    run / fork := true
   )
