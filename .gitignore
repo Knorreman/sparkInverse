@@ -37,5 +37,11 @@ build/
 ### VS Code ###
 .vscode/
 
+### Local build caches ###
+.cache/
+.sbt-boot/
+.sbt-home/
+spark-events/
+
 ### Mac OS ###
 .DS_Store

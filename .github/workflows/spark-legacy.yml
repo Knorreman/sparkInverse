@@ -1,0 +1,36 @@
+name: Spark Legacy CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        spark-version: ['2.4.8']
+        scala-version: ['2.11.12']
+        java-version: ['11']
+
+    steps:
+    - uses: actions/checkout@v3
+    - name: Set up JDK ${{ matrix.java-version }}
+      uses: actions/setup-java@v3
+      with:
+        java-version: ${{ matrix.java-version }}
+        distribution: 'temurin'
+        cache: 'sbt'
+    - name: Setup sbt
+      uses: sbt/setup-sbt@v1
+    - name: Run tests with Spark ${{ matrix.spark-version }}
+      run: |
+        sbt 'set ThisBuild / scalaVersion := "${{ matrix.scala-version }}"' \
+            'set libraryDependencies := Seq("org.apache.spark" %% "spark-core" % "${{ matrix.spark-version }}", "org.apache.spark" %% "spark-mllib" % "${{ matrix.spark-version }}", "org.scalatest" %% "scalatest" % "3.2.19" % Test)' \
+            test
