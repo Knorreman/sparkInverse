@@ -233,7 +233,7 @@ object Main {
       (500,   100, 100, 200),
       (1000,  100, 100, 200),
       (2000,  100, 100, 200),
-      (4000,  100, 200, 200),
+      (4000,  100, 200, 200)
     )
 
     val results = configs.map { case (n, schurBlockSize, nsBlockSize, schurLimit) =>
