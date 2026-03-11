@@ -105,7 +105,7 @@ Additional distributed arithmetic helpers for `CoordinateMatrix` are available t
 - `limit`: local inversion threshold
 - `numMidDimSplits`: Spark matrix-multiply parallelism hint
 - `useCheckpoints`: requires `SparkContext#setCheckpointDir`
-- `tuning`: advanced execution tuning, tracing, and coalescing controls
+- `tuning`: advanced execution tuning and coalescing controls
 
 ### IterativeInverseConfig
 
