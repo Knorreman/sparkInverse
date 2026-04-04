@@ -45,3 +45,6 @@ spark-events/
 
 ### Mac OS ###
 .DS_Store
+
+### Ivy cache ###
+.ivy2/
