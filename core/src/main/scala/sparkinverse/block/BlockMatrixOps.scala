@@ -549,7 +549,7 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     require(order >= 2, s"Iterative inverse order must be at least 2. Got order=$order.")
     require(!config.useCheckpoints || matrix.blocks.sparkContext.getCheckpointDir.isDefined,
       "Checkpoint directory must be configured when useCheckpoints=true. " +
-      "Use sc.setCheckpointDir()to set the checkpoint directory.")
+      "Use sc.setCheckpointDir() to set the checkpoint directory.")
     require(matrix.numRows() == matrix.numCols(), 
       s"Matrix must be square for inversion. Found ${matrix.numRows()} rows and ${matrix.numCols()} columns.")
     
