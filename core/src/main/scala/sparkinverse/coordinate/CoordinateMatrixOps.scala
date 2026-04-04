@@ -304,20 +304,8 @@ final class CoordinateMatrixOps private[sparkinverse] (val matrix: CoordinateMat
     x
   }
 
-  def iterativeInverse(): CoordinateMatrix = iterativeInverse(IterativeInverseConfig())
-
-  def iterativeInverse(config: IterativeInverseConfig): CoordinateMatrix =
-    hyperpowerInverseInternal(config, order = 2, algorithmName = "iterativeInverse")
-
-  def hyperpowerInverse(): CoordinateMatrix = hyperpowerInverse(IterativeInverseConfig())
-
-  def hyperpowerInverse(config: IterativeInverseConfig): CoordinateMatrix =
-    hyperpowerInverse(order = 3, config)
-
-  def hyperpowerInverse(order: Int): CoordinateMatrix = hyperpowerInverse(order, IterativeInverseConfig())
-
-  def hyperpowerInverse(order: Int, config: IterativeInverseConfig): CoordinateMatrix =
-    hyperpowerInverseInternal(config, order = order, algorithmName = "hyperpowerInverse")
+  def iterativeInverse(order: Int = 2, config: IterativeInverseConfig = IterativeInverseConfig()): CoordinateMatrix =
+    hyperpowerInverseInternal(config, order, algorithmName = s"iterativeInverse(order=$order)")
 
   def multiply(other: CoordinateMatrix): CoordinateMatrix = multiply(matrix, other)
 

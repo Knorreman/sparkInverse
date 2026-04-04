@@ -122,7 +122,7 @@ object Main {
     schurMat.blocks.unpersist(true)
     schurInv.blocks.unpersist(true)
 
-    println("\n[Third-order hyperpower inversion]")
+println("\n[Third-order iterative inversion (order=3)]")
     val hp3Config = IterativeInverseConfig(
       maxIter = iterMaxIter,
       tolerance = iterTol,
@@ -131,13 +131,13 @@ object Main {
       numMidDimSplits = config.nsMidSplits
     )
     val (hp3Sec, hp3Mat, hp3Inv) =
-      runOnce(sc, config.n, config.nsBlockSize)(mat => MatrixInversion.block(mat).hyperpowerInverse(hp3Config))
+      runOnce(sc, config.n, config.nsBlockSize)(mat => MatrixInversion.block(mat).iterativeInverse(3, hp3Config))
     val hp3Rmse = computeRmse(hp3Mat, hp3Inv, config.nsMidSplits)
-    println(f"  time=${hp3Sec}%.2fs  RMSE=$hp3Rmse%.3e")
+    println(f"  time=${hp3Sec}%.2fsRMSE=$hp3Rmse%.3e")
     hp3Mat.blocks.unpersist(true)
     hp3Inv.blocks.unpersist(true)
 
-    println("\n[Fourth-order hyperpower inversion]")
+    println("\n[Fourth-order iterative inversion (order=4)]")
     val hp4Config = IterativeInverseConfig(
       maxIter = iterMaxIter,
       tolerance = iterTol,
@@ -146,13 +146,13 @@ object Main {
       numMidDimSplits = config.nsMidSplits
     )
     val (hp4Sec, hp4Mat, hp4Inv) =
-      runOnce(sc, config.n, config.nsBlockSize)(mat => MatrixInversion.block(mat).hyperpowerInverse(4, hp4Config))
+      runOnce(sc, config.n, config.nsBlockSize)(mat => MatrixInversion.block(mat).iterativeInverse(4, hp4Config))
     val hp4Rmse = computeRmse(hp4Mat, hp4Inv, config.nsMidSplits)
     println(f"  time=${hp4Sec}%.2fs  RMSE=$hp4Rmse%.3e")
     hp4Mat.blocks.unpersist(true)
     hp4Inv.blocks.unpersist(true)
 
-    println("\n[Newton-Schulz iterative inversion]")
+    println("\n[Newton-Schulz iterative inversion (order=2)]")
     val iterConfig = IterativeInverseConfig(
       maxIter = iterMaxIter,
       tolerance = iterTol,
@@ -161,7 +161,7 @@ object Main {
       numMidDimSplits = config.nsMidSplits
     )
     val (iterSec, iterMat, iterInv) =
-      runOnce(sc, config.n, config.nsBlockSize)(mat => MatrixInversion.block(mat).iterativeInverse(iterConfig))
+      runOnce(sc, config.n, config.nsBlockSize)(mat => MatrixInversion.block(mat).iterativeInverse(2, iterConfig))
     val iterRmse = computeRmse(iterMat, iterInv, config.nsMidSplits)
     println(f"  time=${iterSec}%.2fs  RMSE=$iterRmse%.3e")
     iterMat.blocks.unpersist(true)

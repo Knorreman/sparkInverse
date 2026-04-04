@@ -661,20 +661,8 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     x
   }
 
-  def iterativeInverse(): BlockMatrix = iterativeInverse(IterativeInverseConfig())
-
-  def iterativeInverse(config: IterativeInverseConfig): BlockMatrix =
-    hyperpowerInverseInternal(config, order = 2, algorithmName = "iterativeInverse")
-
-  def hyperpowerInverse(): BlockMatrix = hyperpowerInverse(IterativeInverseConfig())
-
-  def hyperpowerInverse(config: IterativeInverseConfig): BlockMatrix =
-    hyperpowerInverse(order = 3, config)
-
-  def hyperpowerInverse(order: Int): BlockMatrix = hyperpowerInverse(order, IterativeInverseConfig())
-
-  def hyperpowerInverse(order: Int, config: IterativeInverseConfig): BlockMatrix =
-    hyperpowerInverseInternal(config, order = order, algorithmName = "hyperpowerInverse")
+  def iterativeInverse(order: Int = 2, config: IterativeInverseConfig = IterativeInverseConfig()): BlockMatrix =
+    hyperpowerInverseInternal(config, order, algorithmName = s"iterativeInverse(order=$order)")
 
   def leftPseudoInverse(): BlockMatrix = leftPseudoInverse(RecursiveInverseConfig())
 

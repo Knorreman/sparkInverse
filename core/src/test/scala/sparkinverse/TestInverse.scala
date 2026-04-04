@@ -125,43 +125,43 @@ class TestInverse extends AnyFunSuite {
   test("iterative inverse config on block and coordinate") {
     val block = diagonallyDominantBlockMatrix()
     val blockExpected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(block)))
-    val blockInverse = MatrixInversion.block(block).iterativeInverse(IterativeInverseConfig(maxIter = 30, tolerance = 1e-10))
+    val blockInverse = MatrixInversion.block(block).iterativeInverse(2, IterativeInverseConfig(maxIter = 30, tolerance = 1e-10))
     assert(testMatrixSimilarity(blockInverse.toLocalMatrix(), blockExpected, 1e-8))
 
     val coord = diagonallyDominantCoordinateMatrix()
     val coordExpected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(coord)))
-    val coordInverse = coord.iterativeInverse(IterativeInverseConfig(maxIter = 30, tolerance = 1e-10))
+    val coordInverse = coord.iterativeInverse(2, IterativeInverseConfig(maxIter = 30, tolerance = 1e-10))
     assert(testMatrixSimilarity(coordInverse.toBlockMatrix().toLocalMatrix(), coordExpected, 1e-8))
   }
 
-  test("hyperpower inverse config on block and coordinate") {
+  test("iterative inverse with order 3 on block and coordinate") {
     val block = diagonallyDominantBlockMatrix()
     val blockExpected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(block)))
-    val blockInverse = MatrixInversion.block(block).hyperpowerInverse(IterativeInverseConfig(maxIter = 20, tolerance = 1e-10))
+    val blockInverse = MatrixInversion.block(block).iterativeInverse(3, IterativeInverseConfig(maxIter = 20, tolerance = 1e-10))
     assert(testMatrixSimilarity(blockInverse.toLocalMatrix(), blockExpected, 1e-8))
 
     val coord = diagonallyDominantCoordinateMatrix()
     val coordExpected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(coord)))
-    val coordInverse = coord.hyperpowerInverse(IterativeInverseConfig(maxIter = 20, tolerance = 1e-10))
+    val coordInverse = coord.iterativeInverse(3, IterativeInverseConfig(maxIter = 20, tolerance = 1e-10))
     assert(testMatrixSimilarity(coordInverse.toBlockMatrix().toLocalMatrix(), coordExpected, 1e-8))
   }
 
-  test("hyperpower inverse supports custom order") {
+  test("iterative inverse supports custom order 4") {
     val block = diagonallyDominantBlockMatrix()
     val blockExpected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(block)))
-    val blockInverse = MatrixInversion.block(block).hyperpowerInverse(4, IterativeInverseConfig(maxIter = 15, tolerance = 1e-10))
+    val blockInverse = MatrixInversion.block(block).iterativeInverse(4, IterativeInverseConfig(maxIter = 15, tolerance = 1e-10))
     assert(testMatrixSimilarity(blockInverse.toLocalMatrix(), blockExpected, 1e-8))
 
     val coord = diagonallyDominantCoordinateMatrix()
     val coordExpected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(coord)))
-    val coordInverse = coord.hyperpowerInverse(4, IterativeInverseConfig(maxIter = 15, tolerance = 1e-10))
+    val coordInverse = coord.iterativeInverse(4, IterativeInverseConfig(maxIter = 15, tolerance = 1e-10))
     assert(testMatrixSimilarity(coordInverse.toBlockMatrix().toLocalMatrix(), coordExpected, 1e-8))
   }
 
-  test("block hyperpower inverse supports repeated squaring at order 5") {
+  test("iterative inverse with order 5 supports repeated squaring") {
     val block = diagonallyDominantBlockMatrix()
     val blockExpected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(block)))
-    val blockInverse = MatrixInversion.block(block).hyperpowerInverse(5, IterativeInverseConfig(maxIter = 15, tolerance = 1e-10))
+    val blockInverse = MatrixInversion.block(block).iterativeInverse(5, IterativeInverseConfig(maxIter = 15, tolerance = 1e-10))
     assert(testMatrixSimilarity(blockInverse.toLocalMatrix(), blockExpected, 1e-8))
   }
 
@@ -186,7 +186,7 @@ class TestInverse extends AnyFunSuite {
     
     // Use a tolerance that should converge quickly
     val config = IterativeInverseConfig(maxIter = 15, tolerance = 1e-8, numMidDimSplits = 1)
-    val inverse = MatrixInversion.block(matrix).iterativeInverse(config)
+    val inverse = MatrixInversion.block(matrix).iterativeInverse(2, config)
     
     // Should converge and give accurate result
     assert(testMatrixSimilarity(inverse.toLocalMatrix(), expected, 1e-7))
@@ -202,8 +202,8 @@ class TestInverse extends AnyFunSuite {
     
     // Also test iterative methods
     val iterativeConfig = IterativeInverseConfig(maxIter = 10, tolerance = 1e-10)
-    val iterativeInverse = MatrixInversion.block(identity).iterativeInverse(iterativeConfig)
-    assert(testMatrixSimilarity(iterativeInverse.toLocalMatrix(), identity.toLocalMatrix(), 1e-10))
+    val iterativeInverseResult = MatrixInversion.block(identity).iterativeInverse(2, iterativeConfig)
+    assert(testMatrixSimilarity(iterativeInverseResult.toLocalMatrix(), identity.toLocalMatrix(), 1e-10))
   }
 
   test("very small matrix (1x1 block)") {
@@ -283,7 +283,7 @@ class TestInverse extends AnyFunSuite {
     val sparse = new CoordinateMatrix(entries, 3, 3)
     
     val config = IterativeInverseConfig(maxIter = 20, tolerance = 1e-10)
-    val inverse = sparse.iterativeInverse(config)
+    val inverse = sparse.iterativeInverse(2, config)
     
     // Verify A * A^-1 ≈ I
     val product = sparse.multiply(inverse)
@@ -314,11 +314,11 @@ class TestInverse extends AnyFunSuite {
     
     // Test with different tolerance levels
     val config1 = IterativeInverseConfig(maxIter = 30, tolerance = 1e-6)
-    val inverse1 = MatrixInversion.block(matrix).iterativeInverse(config1)
+    val inverse1 = MatrixInversion.block(matrix).iterativeInverse(2, config1)
     assert(testMatrixSimilarity(inverse1.toLocalMatrix(), expected, 1e-5))
     
     val config2 = IterativeInverseConfig(maxIter = 50, tolerance = 1e-12)
-    val inverse2 = MatrixInversion.block(matrix).iterativeInverse(config2)
+    val inverse2 = MatrixInversion.block(matrix).iterativeInverse(2, config2)
     assert(testMatrixSimilarity(inverse2.toLocalMatrix(), expected, 1e-10))
   }
 
@@ -356,13 +356,13 @@ class TestInverse extends AnyFunSuite {
     assert(negated.exists(e => e.i == 0 && e.j == 0 && math.abs(e.value + 2.0) < 1e-12))
   }
 
-  test("hyperpower with high order") {
+  test("iterative inverse with high order 6") {
     val matrix = diagonallyDominantBlockMatrix()
     val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
     
     // Test with order 6
     val config = IterativeInverseConfig(maxIter = 15, tolerance = 1e-10)
-    val inverse = MatrixInversion.block(matrix).hyperpowerInverse(6, config)
+    val inverse = MatrixInversion.block(matrix).iterativeInverse(6, config)
     assert(testMatrixSimilarity(inverse.toLocalMatrix(), expected, 1e-8))
   }
 
@@ -442,7 +442,7 @@ class TestInverse extends AnyFunSuite {
       useCheckpoints = false,
       numMidDimSplits = 1
     )
-    val inverse1 = MatrixInversion.block(matrix).iterativeInverse(configMemoryOnly)
+    val inverse1 = MatrixInversion.block(matrix).iterativeInverse(2, configMemoryOnly)
     val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
     assert(testMatrixSimilarity(inverse1.toLocalMatrix(), expected, 1e-8))
   }
