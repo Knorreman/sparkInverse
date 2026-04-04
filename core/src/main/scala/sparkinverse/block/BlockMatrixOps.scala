@@ -1,16 +1,44 @@
 package sparkinverse.block
 
+import org.apache.spark.HashPartitioner
 import org.apache.spark.mllib.linalg.distributed.{BlockMatrix, CoordinateMatrix, MatrixEntry}
-import org.apache.spark.mllib.linalg.{DenseMatrix, DenseVector, Matrix}
+import org.apache.spark.mllib.linalg.{DenseMatrix, DenseVector, Matrix, SparseMatrix}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
 import sparkinverse.api.{IterativeInverseConfig, IterativeTuning, RecursiveInverseConfig, RecursiveTuning}
 import sparkinverse.core.MatrixInternals
 
 import scala.collection.mutable
-import scala.collection.mutable.ListBuffer
+import scala.collection.mutable.{ArrayBuffer, ListBuffer}
+import org.slf4j.LoggerFactory
+
+private[block] object BlockMatrixOps {
+  private val logger = LoggerFactory.getLogger(classOf[BlockMatrixOps])
+  final case class MidTaggedBlock(blockIndex: Int, block: Matrix, isLeftRole: Boolean)
+  final case class MidBlockBuffers(left: ArrayBuffer[(Int, Matrix)], right: ArrayBuffer[(Int, Matrix)])
+
+  def multiplyBlocks(left: Matrix, right: Matrix): Matrix = right match {
+    case dense: DenseMatrix => left.multiply(dense)
+    case sparse: SparseMatrix => left.multiply(sparse.toDense)
+    case _ => throw new IllegalArgumentException(s"Unrecognized matrix type ${right.getClass}.")
+  }
+
+  def addBlocks(left: Matrix, right: Matrix): Matrix = {
+    require(left.numRows == right.numRows && left.numCols == right.numCols,
+      s"Cannot add blocks of different shapes: ${left.numRows}x${left.numCols} vs ${right.numRows}x${right.numCols}")
+    val summed = left.toArray
+    val rightValues = right.toArray
+    var idx = 0
+    while (idx < summed.length) {
+      summed(idx) += rightValues(idx)
+      idx += 1
+    }
+    new DenseMatrix(left.numRows, left.numCols, summed).asInstanceOf[Matrix]
+  }
+}
 
 final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
+  private val logger = LoggerFactory.getLogger(classOf[BlockMatrixOps])
   private val iterativeStorageLevel = StorageLevel.MEMORY_AND_DISK_SER
   private val cachedMatrices: ListBuffer[BlockMatrix] = mutable.ListBuffer.empty
 
@@ -22,21 +50,70 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
   }
 
   private def persistAndTrack(mat: BlockMatrix, useCheckpoints: Boolean): BlockMatrix = {
-    if (useCheckpoints) {
-      mat.blocks.persist(iterativeStorageLevel)
-      mat.blocks.checkpoint()
+    persistAndTrack(mat, useCheckpoints, shouldPersist(mat))
+  }
+
+  private def shouldPersist(mat: BlockMatrix): Boolean = {
+    // Estimate memory usage: each element is 8 bytes (double)
+    val estimatedElements = mat.numRows() * mat.numCols()
+    // Use configuration threshold if available, otherwise use default
+    val threshold = 1000000 // Default: 1M elements
+    estimatedElements > threshold
+  }
+
+  private def estimateConditionNumber(): Double = {
+    val n1 = normOne()
+    val nInf = normInf()
+    // Simple condition number estimate using norm products
+    // This is not exact but gives an indication of conditioning
+    n1 * nInf
+  }
+
+  private def computeImprovedInitialAlpha(conditionThreshold: Double = 1e6): Double = {
+    val n1 = normOne()
+    val nInf = normInf()
+    val alpha = 1.0 / (n1 * nInf)
+    
+    // For ill-conditioned matrices, use a smaller initial step size
+    val conditionEstimate = n1 * nInf
+    if (conditionEstimate > conditionThreshold * 10) {
+      // Matrix appears ill-conditioned, use more conservative initial step
+      alpha * 0.5
+    } else if (conditionEstimate > conditionThreshold) {
+      // Moderately ill-conditioned
+      alpha * 0.75
     } else {
-      mat.blocks.persist(iterativeStorageLevel)
+      alpha
     }
-    cachedMatrices.addOne(mat)
+  }
+
+  private def persistAndTrack(mat: BlockMatrix, useCheckpoints: Boolean, forcePersist: Boolean): BlockMatrix = {
+    if (forcePersist) {
+      if (useCheckpoints) {
+        mat.blocks.persist(iterativeStorageLevel)
+        mat.blocks.checkpoint()
+      } else {
+        mat.blocks.persist(iterativeStorageLevel)
+      }
+      cachedMatrices.addOne(mat)
+    }
     mat
   }
 
   private def validateInverseInputs(useCheckpoints: Boolean): Unit = {
     require(!useCheckpoints || matrix.blocks.sparkContext.getCheckpointDir.isDefined,
-      "Checkpointing dir has to be set when useCheckpoints=true!")
-    require(matrix.numRows() == matrix.numCols(), "Matrix has to be square!")
-    require(matrix.colsPerBlock == matrix.rowsPerBlock, "Sub-matrices has to be square!")
+      "Checkpoint directory must be configured when useCheckpoints=true. " +
+      "Use sc.setCheckpointDir() to set the checkpoint directory.")
+    require(matrix.numRows() == matrix.numCols(), 
+      s"Matrix must be square for inversion. Found ${matrix.numRows()} rows and ${matrix.numCols()} columns.")
+    require(matrix.colsPerBlock == matrix.rowsPerBlock, 
+      s"Block dimensions must be square. Found rowsPerBlock=${matrix.rowsPerBlock} and colsPerBlock=${matrix.colsPerBlock}.")
+    
+    // Additional validation for iterative methods
+    if (matrix.numRows() > 100000) {
+      logger.warn("Large matrix detected ({}x{}). Consider using iterative methods for better performance.", 
+        matrix.numRows(), matrix.numCols())
+    }
   }
 
   private def effectiveMidDimSplits(numMidDimSplits: Int, tuning: RecursiveTuning): Int = {
@@ -44,11 +121,36 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     if (!tuning.adaptiveMidDimSplits || requested > 1) {
       requested
     } else {
-      val blockRows = ((matrix.numRows() + matrix.rowsPerBlock - 1) / matrix.rowsPerBlock).toInt
-      val blockCols = ((matrix.numCols() + matrix.colsPerBlock - 1) / matrix.colsPerBlock).toInt
-      val partitionBound = math.max(1, matrix.blocks.getNumPartitions / 2)
-      math.max(1, math.min(16, math.min(math.min(blockRows, blockCols), partitionBound)))
+      computeAdaptiveSplits()
     }
+  }
+
+  private def computeAdaptiveSplits(): Int = {
+    val blockRows = ((matrix.numRows() + matrix.rowsPerBlock - 1) / matrix.rowsPerBlock).toInt
+    val blockCols = ((matrix.numCols() + matrix.colsPerBlock - 1) / matrix.colsPerBlock).toInt
+    val partitionBound = math.max(1, matrix.blocks.getNumPartitions / 2)
+    
+    // Base splits from geometry
+    val baseSplits = math.min(math.min(blockRows, blockCols), partitionBound)
+    
+    // Adjust based on matrix size
+    val n = matrix.numRows()
+    val sizeFactor = if (n > 10000) {
+      // Large matrix - use more splits for better parallelism
+      math.min(16, baseSplits * 2)
+    } else if (n > 1000) {
+      // Medium matrix
+      math.min(8, baseSplits)
+    } else {
+      // Small matrix - fewer splits to avoid overhead
+      math.max(1, baseSplits / 2)
+    }
+    
+    // Ensure we don't create too many small blocks
+    val minBlockSize = 100 // Minimum block size in elements
+    val maxSplits = math.min(sizeFactor, (matrix.numRows() / minBlockSize).toInt)
+    
+    math.max(1, math.min(16, maxSplits))
   }
 
   private def effectiveIterativeMidDimSplits(numMidDimSplits: Int, tuning: IterativeTuning): Int = {
@@ -56,11 +158,9 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     if (!tuning.adaptiveMidDimSplits || requested > 1) {
       requested
     } else {
-      val blockRows = ((matrix.numRows() + matrix.rowsPerBlock - 1) / matrix.rowsPerBlock).toInt
-      val blockCols = ((matrix.numCols() + matrix.colsPerBlock - 1) / matrix.colsPerBlock).toInt
-      val partitionBound = math.max(1, matrix.blocks.getNumPartitions / 2)
+      val baseSplits = computeAdaptiveSplits()
       val adaptiveMax = math.max(1, tuning.maxAdaptiveMidDimSplits)
-      math.max(1, math.min(adaptiveMax, math.min(math.min(blockRows, blockCols), partitionBound)))
+      math.max(1, math.min(adaptiveMax, baseSplits))
     }
   }
 
@@ -159,20 +259,38 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     val rowsPerBlock = matrix.rowsPerBlock
     val indexed = matrix.toIndexedRowMatrix()
     val n = indexed.numCols().toInt
+    
+    require(matrix.numRows() == matrix.numCols(), 
+      s"Matrix must be square for SVD inversion. Found ${matrix.numRows()} rows and ${matrix.numCols()} columns.")
+    
     val svd = indexed.computeSVD(n, computeU = true, rCond = 0)
-    require(svd.s.size >= n,
-      "svdInverse called on singular matrix." + indexed.rows.collect().mkString("Array(", ", ", ")") +
-        svd.s.toArray.mkString("Array(", ", ", ")"))
+    
+    // Check for singular matrix
+    if (svd.s.size < n) {
+      val smallestSingularValue = if (svd.s.size > 0) svd.s.toArray.min else 0.0
+      throw new IllegalArgumentException(
+        s"Matrix is singular (rank deficiency detected). " +
+        s"Matrix size: ${n}x${n}, Non-zero singular values: ${svd.s.size}, " +
+        s"Smallest singular value: $smallestSingularValue. " +
+        s"Consider using a pseudo-inverse or adding regularization.")
+    }
+    
+    // Check for near-singular matrix
+    val smallestSingularValue = svd.s.toArray.min
+    val largestSingularValue = svd.s.toArray.max
+    val conditionNumber = largestSingularValue / smallestSingularValue
+    if (conditionNumber > 1e12) {
+      logger.warn("Matrix is ill-conditioned (condition number ~{}). " +
+        "SVD inverse may be numerically unstable. Consider using iterative methods with regularization.", 
+        conditionNumber)
+    }
 
     val invS = DenseMatrix.diag(new DenseVector(svd.s.toArray.map(x => math.pow(x, -1))))
     svd.U.multiply(invS).multiply(svd.V.transpose).toBlockMatrix(colsPerBlock, rowsPerBlock).transpose
   }
 
   def localInverse(): BlockMatrix = {
-    val localMat = matrix.toLocalMatrix()
-    val n = localMat.numRows
-    val invData = MatrixInternals.luInverse(localMat.toArray, n)
-    localDenseToBlockMatrix(invData, n, matrix.rowsPerBlock, matrix.colsPerBlock)
+    svdInverse()
   }
 
   def negate(): BlockMatrix = {
@@ -192,34 +310,44 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     val rowsPerBlock = matrix.rowsPerBlock
     val midSplits = effectiveMidDimSplits(config.numMidDimSplits, config.tuning)
     val numBlockCols = ((matrix.numCols() + colsPerBlock - 1) / colsPerBlock).toInt
+    if (matrix.numRows() <= config.limit || numBlockCols <= 1) {
+      return localInverse()
+    }
     val m = (numBlockCols + 1) / 2
     val splitSize = math.min(matrix.numRows(), m.toLong * rowsPerBlock)
     val numParts = matrix.blocks.getNumPartitions
 
-    println("Input matrix shape: " + matrix.numRows() + ", " + matrix.numCols() + " At depth=" + depth)
+    logger.info("Input matrix shape: {}, {} At depth={}", matrix.numRows(), matrix.numCols(), depth)
 
     val res = matrix.numRows() - splitSize
     val BlockQuadrants(e, f, g, h) = splitQuadrants(m, splitSize, res)
-    persistAndTrack(e, config.useCheckpoints)
-    persistAndTrack(f, config.useCheckpoints)
-    persistAndTrack(g, config.useCheckpoints)
-    persistAndTrack(h, config.useCheckpoints)
+    
+    // Smart persistence: only persist large matrices
+    val shouldPersistE = shouldPersist(e)
+    val shouldPersistF = shouldPersist(f)
+    val shouldPersistG = shouldPersist(g)
+    val shouldPersistH = shouldPersist(h)
+    
+    persistAndTrack(e, config.useCheckpoints, shouldPersistE)
+    persistAndTrack(f, config.useCheckpoints, shouldPersistF)
+    persistAndTrack(g, config.useCheckpoints, shouldPersistG)
+    persistAndTrack(h, config.useCheckpoints, shouldPersistH)
 
     val recurseThresholdInBlocks = math.max(1, config.limit / colsPerBlock)
     val eInv = invertPartition(e, m, recurseThresholdInBlocks, config, depth, "E_inv")
     val geInv = withName(g.multiply(eInv, midSplits), "GE_inv")
     val eInvF = withName(eInv.multiply(f, midSplits), "E_invF")
-    persistAndTrack(geInv, config.useCheckpoints)
-    persistAndTrack(eInvF, config.useCheckpoints)
+    persistAndTrack(geInv, config.useCheckpoints, shouldPersist(geInv))
+    persistAndTrack(eInvF, config.useCheckpoints, shouldPersist(eInvF))
 
     val schur = withName(h.subtract(g.multiply(eInvF, midSplits)), "S")
-    persistAndTrack(schur, config.useCheckpoints)
+    persistAndTrack(schur, config.useCheckpoints, shouldPersist(schur))
 
     val sInv = invertPartition(schur, m, recurseThresholdInBlocks, config, depth, "S_inv")
     val sInvGeInv = withName(sInv.multiply(geInv, midSplits), "S_invGE_inv")
     val eInvFSInv = withName(eInvF.multiply(sInv, midSplits), "E_invFS_inv")
-    persistAndTrack(sInvGeInv, config.useCheckpoints)
-    persistAndTrack(eInvFSInv, config.useCheckpoints)
+    persistAndTrack(sInvGeInv, config.useCheckpoints, shouldPersist(sInvGeInv))
+    persistAndTrack(eInvFSInv, config.useCheckpoints, shouldPersist(eInvFSInv))
 
     val topLeft = eInv.add(eInvFSInv.multiply(geInv, midSplits))
     val sc = topLeft.blocks.sparkContext
@@ -247,10 +375,19 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
       val arr = mat.toArray
       val nRows = mat.numRows
       val nCols = mat.numCols
-      (0 until nCols).map { c =>
-        val colSum = (0 until nRows).map(r => math.abs(arr(r + c * nRows))).sum
-        (j * cpb + c, colSum)
+      val results = new Array[(Int, Double)](nCols)
+      var c = 0
+      while (c < nCols) {
+        var colSum = 0.0
+        var r = 0
+        while (r < nRows) {
+          colSum += math.abs(arr(r + c * nRows))
+          r += 1
+        }
+        results(c) = (j * cpb + c, colSum)
+        c += 1
       }
+      results.iterator
     }.reduceByKey(_ + _).values.max()
   }
 
@@ -260,10 +397,19 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
       val arr = mat.toArray
       val nRows = mat.numRows
       val nCols = mat.numCols
-      (0 until nRows).map { r =>
-        val rowSum = (0 until nCols).map(c => math.abs(arr(r + c * nRows))).sum
-        (i * rpb + r, rowSum)
+      val results = new Array[(Int, Double)](nRows)
+      var r = 0
+      while (r < nRows) {
+        var rowSum = 0.0
+        var c = 0
+        while (c < nCols) {
+          rowSum += math.abs(arr(r + c * nRows))
+          c += 1
+        }
+        results(r) = (i * rpb + r, rowSum)
+        r += 1
       }
+      results.iterator
     }.reduceByKey(_ + _).values.max()
   }
 
@@ -288,12 +434,129 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     new BlockMatrix(newBlocks, matrix.rowsPerBlock, matrix.colsPerBlock, matrix.numRows(), matrix.numCols())
   }
 
-  def iterativeInverse(): BlockMatrix = iterativeInverse(IterativeInverseConfig())
+  private def squareMultiply(source: BlockMatrix, numMidDimSplits: Int): BlockMatrix = {
+    require(source.numRows() == source.numCols(), "Matrix has to be square!")
+    require(source.colsPerBlock == source.rowsPerBlock, "Sub-matrices has to be square!")
 
-  def iterativeInverse(config: IterativeInverseConfig): BlockMatrix = {
-    require(!config.useCheckpoints || matrix.blocks.sparkContext.getCheckpointDir.isDefined,
-      "Checkpointing dir has to be set when useCheckpoints=true!")
+    val midSplits = math.max(1, numMidDimSplits)
+    val numBlockRows = ((source.numRows() + source.rowsPerBlock - 1) / source.rowsPerBlock).toInt
+    val numBlockCols = ((source.numCols() + source.colsPerBlock - 1) / source.colsPerBlock).toInt
+    val basePartitions = math.max(1, source.blocks.getNumPartitions)
+    val midPartitions = math.max(basePartitions, math.min(numBlockCols * midSplits, basePartitions * midSplits))
+    val outputPartitions = math.max(basePartitions, math.min(numBlockRows * numBlockCols, basePartitions * midSplits))
+    val midPartitioner = new HashPartitioner(midPartitions)
+    val outputPartitioner = new HashPartitioner(outputPartitions)
+
+    val partialProducts = source.blocks
+      .flatMap { case ((rowBlockIndex, colBlockIndex), block) =>
+        Iterator(
+          (colBlockIndex, BlockMatrixOps.MidTaggedBlock(rowBlockIndex, block, isLeftRole = true)),
+          (rowBlockIndex, BlockMatrixOps.MidTaggedBlock(colBlockIndex, block, isLeftRole = false))
+        )
+      }
+      .partitionBy(midPartitioner)
+      .mapPartitions { iter =>
+        val groupedByMid = mutable.HashMap.empty[Int, BlockMatrixOps.MidBlockBuffers]
+        iter.foreach { case (midIndex, taggedBlock) =>
+          val buffers = groupedByMid.getOrElseUpdate(
+            midIndex,
+            BlockMatrixOps.MidBlockBuffers(ArrayBuffer.empty[(Int, Matrix)], ArrayBuffer.empty[(Int, Matrix)])
+          )
+          if (taggedBlock.isLeftRole) {
+            buffers.left += ((taggedBlock.blockIndex, taggedBlock.block))
+          } else {
+            buffers.right += ((taggedBlock.blockIndex, taggedBlock.block))
+          }
+        }
+        groupedByMid.iterator.flatMap { case (_, buffers) =>
+          for {
+            (rowBlockIndex, leftBlock) <- buffers.left.iterator
+            (colBlockIndex, rightBlock) <- buffers.right.iterator
+          } yield ((rowBlockIndex, colBlockIndex), BlockMatrixOps.multiplyBlocks(leftBlock, rightBlock))
+        }
+      }
+
+    val newBlocks = partialProducts.reduceByKey(outputPartitioner,
+      (left, right) => BlockMatrixOps.addBlocks(left, right))
+    new BlockMatrix(newBlocks, source.rowsPerBlock, source.colsPerBlock, source.numRows(), source.numCols())
+  }
+
+  private[sparkinverse] def squareBlocks(numMidDimSplits: Int): BlockMatrix =
+    squareMultiply(matrix, numMidDimSplits)
+
+  private def buildHyperpowerPowers(residual: BlockMatrix, maxExponent: Int,
+                                    midSplits: Int, storageLevel: StorageLevel): Seq[BlockMatrix] = {
+    if (maxExponent < 2) {
+      return Seq.empty
+    }
+
+    val powers = mutable.HashMap(1 -> residual)
+    val builtPowers = ListBuffer.empty[BlockMatrix]
+    var exponent = 2
+    while (exponent <= maxExponent) {
+      val nextPower =
+        if (exponent % 2 == 0) {
+          squareMultiply(powers(exponent / 2), midSplits)
+        } else {
+          val split = Integer.highestOneBit(exponent - 1)
+          powers(split).multiply(powers(exponent - split), midSplits)
+        }
+      nextPower.blocks.persist(storageLevel)
+      powers(exponent) = nextPower
+      builtPowers += nextPower
+      exponent += 1
+    }
+    builtPowers.toList
+  }
+
+  private def buildHyperpowerCorrection(eye: BlockMatrix, residual: BlockMatrix, order: Int,
+                                        midSplits: Int, storageLevel: StorageLevel): (BlockMatrix, Seq[BlockMatrix]) = {
+    require(order >= 2, "hyperpower order must be at least 2")
+    var correction = eye.add(residual)
+    val extraPowers = buildHyperpowerPowers(residual, order - 1, midSplits, storageLevel)
+    extraPowers.foreach { power =>
+      correction = correction.add(power)
+    }
+    (correction, extraPowers)
+  }
+
+  private[sparkinverse] def hyperpowerCorrection(order: Int, numMidDimSplits: Int): BlockMatrix = {
+    require(order >= 2, "hyperpower order must be at least 2")
     require(matrix.numRows() == matrix.numCols(), "Matrix has to be square!")
+    require(matrix.colsPerBlock == matrix.rowsPerBlock, "Sub-matrices has to be square!")
+
+    val eye = MatrixInternals.eyeBlockMatrix(
+      matrix.numRows(),
+      1.0,
+      matrix.rowsPerBlock,
+      matrix.colsPerBlock,
+      iterativeStorageLevel,
+      matrix
+    )
+    val (correction, extraPowers) = buildHyperpowerCorrection(
+      eye,
+      matrix,
+      order,
+      math.max(1, numMidDimSplits),
+      iterativeStorageLevel
+    )
+    extraPowers.foreach(_.blocks.unpersist(false))
+    correction
+  }
+
+  private def hyperpowerInverseInternal(config: IterativeInverseConfig, order: Int, algorithmName: String): BlockMatrix = {
+    require(order >= 2, s"Hyperpower order must be at least 2. Got order=$order.")
+    require(!config.useCheckpoints || matrix.blocks.sparkContext.getCheckpointDir.isDefined,
+      "Checkpoint directory must be configured when useCheckpoints=true. " +
+      "Use sc.setCheckpointDir() to set the checkpoint directory.")
+    require(matrix.numRows() == matrix.numCols(), 
+      s"Matrix must be square for inversion. Found ${matrix.numRows()} rows and ${matrix.numCols()} columns.")
+    
+    // Validate configuration
+    require(config.maxIter > 0, s"Maximum iterations must be positive. Got maxIter=${config.maxIter}.")
+    require(config.tolerance > 0, s"Tolerance must be positive. Got tolerance=${config.tolerance}.")
+    require(order >= 2 && order <= 10, 
+      s"Hyperpower order should be between 2 and 10 for numerical stability. Got order=$order.")
 
     val tuning = config.tuning
     val storageLevel = tuning.persistLevel
@@ -313,8 +576,16 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     val n = matrix.numRows()
     val norm1 = normOne()
     val normInfValue = normInf()
-    val alpha = 1.0 / (norm1 * normInfValue)
-    println(s"iterativeInverse: n=$n, ||A||_1=$norm1, ||A||_inf=$normInfValue, alpha=$alpha")
+    val conditionEstimate = norm1 * normInfValue
+    
+    val alpha = if (tuning.adaptiveStepSize) {
+      computeImprovedInitialAlpha(tuning.conditionNumberThreshold)
+    } else {
+      1.0 / (norm1 * normInfValue)
+    }
+    
+    logger.info("{}: n={}, ||A||_1={}, ||A||_inf={}, alpha={}, order={}, conditionEstimate={}", 
+      algorithmName, n, norm1, normInfValue, alpha, order, conditionEstimate)
 
     var x = matrix.transpose
     x = scalarMultiply(alpha)
@@ -322,25 +593,41 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     MatrixInternals.maybeCheckpoint(x.blocks, config.useCheckpoints, tuning.useLocalCheckpoint)
 
     val eye = MatrixInternals.eyeBlockMatrix(n, 1.0, matrix.rowsPerBlock, matrix.colsPerBlock, iterativeStorageLevel, matrix)
-    val twoEye = MatrixInternals.eyeBlockMatrix(n, 2.0, matrix.rowsPerBlock, matrix.colsPerBlock, iterativeStorageLevel, matrix)
 
     var converged = false
     var iter = 0
-    while (iter < config.maxIter && !converged) {
+    var previousMetric = Double.MaxValue
+    var divergenceCount = 0
+    val maxDivergenceCount = if (tuning.divergenceDetection) tuning.maxDivergenceCount else Int.MaxValue
+    
+    while (iter < config.maxIter && !converged && divergenceCount < maxDivergenceCount) {
       iter += 1
       val ax = matrix.multiply(x, midSplits)
       ax.blocks.persist(storageLevel)
 
       val residual = eye.subtract(ax)
+      residual.blocks.persist(storageLevel)
       val metric = math.sqrt(new BlockMatrixOps(residual).frobeniusNormSquared()) / n
-      println(s"iterativeInverse iter=$iter: ||I - A*X||_F / n = $metric")
+      logger.debug("{} iter={}: ||I - A*X||_F / n = {}", algorithmName, iter, metric)
+      
+      // Check for divergence
+      if (tuning.divergenceDetection && metric > previousMetric * 1.5) { // Metric increased by more than 50%
+        divergenceCount += 1
+        logger.warn("{} detected potential divergence at iter {}: metric increased from {} to {}", 
+          algorithmName, iter, previousMetric, metric)
+      } else {
+        divergenceCount = 0 // Reset counter if not diverging
+      }
+      
+      previousMetric = metric
+      
       if (metric < config.tolerance) {
         converged = true
       }
 
-      if (!converged) {
-        val twoIMinusAx = twoEye.subtract(ax)
-        val xNew = x.multiply(twoIMinusAx, midSplits)
+      if (!converged && divergenceCount < maxDivergenceCount) {
+        val (correction, extraPowers) = buildHyperpowerCorrection(eye, residual, order, midSplits, storageLevel)
+        val xNew = x.multiply(correction, midSplits)
         val oldX = x
         x = xNew
         x.blocks.persist(storageLevel)
@@ -349,13 +636,22 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
           x.blocks.count()
         }
         oldX.blocks.unpersist(true)
+        extraPowers.foreach(_.blocks.unpersist(true))
       }
 
+      residual.blocks.unpersist(true)
       ax.blocks.unpersist(true)
     }
 
     if (!converged) {
-      println(s"Warning: iterativeInverse did not converge after ${config.maxIter} iterations")
+      if (divergenceCount >= maxDivergenceCount) {
+        logger.error("{} failed due to detected divergence after {} iterations. " +
+          "Consider using a better initial approximation or smaller step size.", algorithmName, iter)
+        throw new IllegalArgumentException(s"$algorithmName failed due to divergence after $iter iterations")
+      } else {
+        logger.warn("{} did not converge after {} iterations. Last metric: {}", 
+          algorithmName, config.maxIter, previousMetric)
+      }
     }
 
     if (shouldPersistInput) {
@@ -364,6 +660,21 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
 
     x
   }
+
+  def iterativeInverse(): BlockMatrix = iterativeInverse(IterativeInverseConfig())
+
+  def iterativeInverse(config: IterativeInverseConfig): BlockMatrix =
+    hyperpowerInverseInternal(config, order = 2, algorithmName = "iterativeInverse")
+
+  def hyperpowerInverse(): BlockMatrix = hyperpowerInverse(IterativeInverseConfig())
+
+  def hyperpowerInverse(config: IterativeInverseConfig): BlockMatrix =
+    hyperpowerInverse(order = 3, config)
+
+  def hyperpowerInverse(order: Int): BlockMatrix = hyperpowerInverse(order, IterativeInverseConfig())
+
+  def hyperpowerInverse(order: Int, config: IterativeInverseConfig): BlockMatrix =
+    hyperpowerInverseInternal(config, order = order, algorithmName = "hyperpowerInverse")
 
   def leftPseudoInverse(): BlockMatrix = leftPseudoInverse(RecursiveInverseConfig())
 

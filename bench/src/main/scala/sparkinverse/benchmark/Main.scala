@@ -30,6 +30,10 @@ object Main {
     nsMidSplits: Int,
     schurSec: Double,
     schurRmse: Double,
+    hp3Sec: Double,
+    hp3Rmse: Double,
+    hp4Sec: Double,
+    hp4Rmse: Double,
     iterSec: Double,
     iterRmse: Double
   )
@@ -41,7 +45,8 @@ object Main {
   )
 
   def buildMatrix(sc: SparkContext, n: Int, blockSize: Int, seed: Long): BlockMatrix = {
-    val lnrdd = RandomRDDs.poissonVectorRDD(sc, mean = 0.01, numRows = n, numCols = n, seed = seed, numPartitions = 8)
+    val lnrdd = RandomRDDs.normalVectorRDD(sc, numRows = n, numCols = n, seed = seed, numPartitions = 8)
+//    val lnrdd = RandomRDDs.poissonVectorRDD(sc, mean = 0.01, numRows = n, numCols = n, seed = seed, numPartitions = 8)
       .zipWithIndex()
       .map(_.swap)
       .map(x => IndexedRow(x._1, x._2))
@@ -98,6 +103,8 @@ object Main {
     println(s"\n${"=" * 60}")
     println(s"  n=${config.n}")
     println(s"  schur: blockSize=${config.schurBlockSize} limit=${config.schurLimit} midSplits=${config.schurMidSplits}")
+    println(s"  hp3  : blockSize=${config.nsBlockSize} midSplits=${config.nsMidSplits}")
+    println(s"  hp4  : blockSize=${config.nsBlockSize} midSplits=${config.nsMidSplits}")
     println(s"  n-s  : blockSize=${config.nsBlockSize} midSplits=${config.nsMidSplits}")
     println(s"${"=" * 60}")
 
@@ -114,6 +121,36 @@ object Main {
     println(f"  time=${schurSec}%.2fs  RMSE=$schurRmse%.3e")
     schurMat.blocks.unpersist(true)
     schurInv.blocks.unpersist(true)
+
+    println("\n[Third-order hyperpower inversion]")
+    val hp3Config = IterativeInverseConfig(
+      maxIter = iterMaxIter,
+      tolerance = iterTol,
+      useCheckpoints = true,
+      checkpointInterval = 5,
+      numMidDimSplits = config.nsMidSplits
+    )
+    val (hp3Sec, hp3Mat, hp3Inv) =
+      runOnce(sc, config.n, config.nsBlockSize)(mat => MatrixInversion.block(mat).hyperpowerInverse(hp3Config))
+    val hp3Rmse = computeRmse(hp3Mat, hp3Inv, config.nsMidSplits)
+    println(f"  time=${hp3Sec}%.2fs  RMSE=$hp3Rmse%.3e")
+    hp3Mat.blocks.unpersist(true)
+    hp3Inv.blocks.unpersist(true)
+
+    println("\n[Fourth-order hyperpower inversion]")
+    val hp4Config = IterativeInverseConfig(
+      maxIter = iterMaxIter,
+      tolerance = iterTol,
+      useCheckpoints = true,
+      checkpointInterval = 5,
+      numMidDimSplits = config.nsMidSplits
+    )
+    val (hp4Sec, hp4Mat, hp4Inv) =
+      runOnce(sc, config.n, config.nsBlockSize)(mat => MatrixInversion.block(mat).hyperpowerInverse(4, hp4Config))
+    val hp4Rmse = computeRmse(hp4Mat, hp4Inv, config.nsMidSplits)
+    println(f"  time=${hp4Sec}%.2fs  RMSE=$hp4Rmse%.3e")
+    hp4Mat.blocks.unpersist(true)
+    hp4Inv.blocks.unpersist(true)
 
     println("\n[Newton-Schulz iterative inversion]")
     val iterConfig = IterativeInverseConfig(
@@ -139,20 +176,25 @@ object Main {
       nsMidSplits = config.nsMidSplits,
       schurSec = schurSec,
       schurRmse = schurRmse,
+      hp3Sec = hp3Sec,
+      hp3Rmse = hp3Rmse,
+      hp4Sec = hp4Sec,
+      hp4Rmse = hp4Rmse,
       iterSec = iterSec,
       iterRmse = iterRmse
     )
   }
 
   def printTable(results: Seq[BenchResult]): Unit = {
-    println("\n" + "=" * 114)
-    println(f"  ${"n"}%6s  ${"sBsz"}%5s  ${"nBsz"}%5s  ${"sLim"}%5s  ${"sSplit"}%6s  ${"nSplit"}%6s  | ${"Schur(s)"}%10s  ${"Schur RMSE"}%12s  | ${"N-S(s)"}%10s  ${"N-S RMSE"}%10s  ${"Speedup"}%8s")
-    println("-" * 114)
+    println("\n" + "=" * 186)
+    println(f"  ${"n"}%6s  ${"sBsz"}%5s  ${"iBsz"}%5s  ${"sLim"}%5s  ${"sSplit"}%6s  ${"iSplit"}%6s  | ${"Schur(s)"}%10s  ${"Schur RMSE"}%12s  | ${"HP3(s)"}%10s  ${"HP3 RMSE"}%10s  | ${"HP4(s)"}%10s  ${"HP4 RMSE"}%10s  | ${"N-S(s)"}%10s  ${"N-S RMSE"}%10s  ${"HP4/HP3"}%9s  ${"N-S/HP3"}%9s")
+    println("-" * 186)
     for (r <- results) {
-      val speedup = r.schurSec / r.iterSec
-      println(f"  ${r.n}%6d  ${r.schurBlockSize}%5d  ${r.nsBlockSize}%5d  ${r.schurLimit}%5d  ${r.schurMidSplits}%6d  ${r.nsMidSplits}%6d  | ${r.schurSec}%10.2f  ${r.schurRmse}%12.3e  | ${r.iterSec}%10.2f  ${r.iterRmse}%10.3e  ${speedup}%8.2fx")
+      val hp4VsHp3 = r.hp4Sec / r.hp3Sec
+      val nsVsHp3 = r.iterSec / r.hp3Sec
+      println(f"  ${r.n}%6d  ${r.schurBlockSize}%5d  ${r.nsBlockSize}%5d  ${r.schurLimit}%5d  ${r.schurMidSplits}%6d  ${r.nsMidSplits}%6d  | ${r.schurSec}%10.2f  ${r.schurRmse}%12.3e  | ${r.hp3Sec}%10.2f  ${r.hp3Rmse}%10.3e  | ${r.hp4Sec}%10.2f  ${r.hp4Rmse}%10.3e  | ${r.iterSec}%10.2f  ${r.iterRmse}%10.3e  ${hp4VsHp3}%9.2fx  ${nsVsHp3}%9.2fx")
     }
-    println("=" * 114)
+    println("=" * 186)
   }
 
   def main(args: Array[String]): Unit = {
@@ -187,10 +229,10 @@ object Main {
     sc.setCheckpointDir("/tmp/spark_checkpoints")
 
     val configs = Seq(
-      BenchConfig(n = 500, schurBlockSize = 100, nsBlockSize = 100, schurLimit = 200, schurMidSplits = 1, nsMidSplits = 1),
-      BenchConfig(n = 2000, schurBlockSize = 100, nsBlockSize = 200, schurLimit = 300, schurMidSplits = 4, nsMidSplits = 4),
-      BenchConfig(n = 4000, schurBlockSize = 100, nsBlockSize = 200, schurLimit = 300, schurMidSplits = 4, nsMidSplits = 4),
-      BenchConfig(n = 6000, schurBlockSize = 100, nsBlockSize = 400, schurLimit = 400, schurMidSplits = 8, nsMidSplits = 4)
+      BenchConfig(n = 1000, schurBlockSize = 125, nsBlockSize = 125, schurLimit = 250, schurMidSplits = 2, nsMidSplits = 2),
+      BenchConfig(n = 4000, schurBlockSize = 250, nsBlockSize = 250, schurLimit = 500, schurMidSplits = 4, nsMidSplits = 4),
+      BenchConfig(n = 6000, schurBlockSize = 300, nsBlockSize = 300, schurLimit = 600, schurMidSplits = 4, nsMidSplits = 4),
+//      BenchConfig(n = 10000, schurBlockSize = 250, nsBlockSize = 500, schurLimit = 500, schurMidSplits = 4, nsMidSplits = 4)
     )
 
     val results = configs.map { config =>

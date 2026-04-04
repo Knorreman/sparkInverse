@@ -52,9 +52,9 @@ lazy val bench = (project in file("bench"))
       case _ => MergeStrategy.first
     },
     run / javaOptions ++= Seq(
-      "-Xmx16g",
-      "-Dspark.driver.memory=16g",
-      "-Dspark.executor.memory=16g"
+      "-Xmx32g",
+      "-Dspark.driver.memory=32g",
+      "-Dspark.executor.memory=32g"
     ),
     run / envVars ++= {
       val threads = sys.props.getOrElse("sparkInverse.openblasThreads", "1")
