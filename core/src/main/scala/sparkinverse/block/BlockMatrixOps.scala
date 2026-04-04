@@ -544,11 +544,12 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     correction
   }
 
-  private def hyperpowerInverseInternal(config: IterativeInverseConfig, order: Int, algorithmName: String): BlockMatrix = {
-    require(order >= 2, s"Hyperpower order must be at least 2. Got order=$order.")
+  private def iterativeInverseInternal(config: IterativeInverseConfig, order: Int): BlockMatrix = {
+    val algorithmName = s"iterativeInverse(order=$order)"
+    require(order >= 2, s"Iterative inverse order must be at least 2. Got order=$order.")
     require(!config.useCheckpoints || matrix.blocks.sparkContext.getCheckpointDir.isDefined,
       "Checkpoint directory must be configured when useCheckpoints=true. " +
-      "Use sc.setCheckpointDir() to set the checkpoint directory.")
+      "Use sc.setCheckpointDir()to set the checkpoint directory.")
     require(matrix.numRows() == matrix.numCols(), 
       s"Matrix must be square for inversion. Found ${matrix.numRows()} rows and ${matrix.numCols()} columns.")
     
@@ -556,7 +557,7 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     require(config.maxIter > 0, s"Maximum iterations must be positive. Got maxIter=${config.maxIter}.")
     require(config.tolerance > 0, s"Tolerance must be positive. Got tolerance=${config.tolerance}.")
     require(order >= 2 && order <= 10, 
-      s"Hyperpower order should be between 2 and 10 for numerical stability. Got order=$order.")
+      s"Iterative inverse order should be between 2 and 10 for numerical stability. Got order=$order.")
 
     val tuning = config.tuning
     val storageLevel = tuning.persistLevel
@@ -662,7 +663,7 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
   }
 
   def iterativeInverse(order: Int = 2, config: IterativeInverseConfig = IterativeInverseConfig()): BlockMatrix =
-    hyperpowerInverseInternal(config, order, algorithmName = s"iterativeInverse(order=$order)")
+    iterativeInverseInternal(config, order)
 
   def leftPseudoInverse(): BlockMatrix = leftPseudoInverse(RecursiveInverseConfig())
 

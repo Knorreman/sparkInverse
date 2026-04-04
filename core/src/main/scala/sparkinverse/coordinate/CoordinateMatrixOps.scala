@@ -237,11 +237,14 @@ final class CoordinateMatrixOps private[sparkinverse] (val matrix: CoordinateMat
     (correction, extraPowers.toList)
   }
 
-  private def hyperpowerInverseInternal(config: IterativeInverseConfig, order: Int, algorithmName: String): CoordinateMatrix = {
-    require(order >= 2, "hyperpower order must be at least 2")
+  private def iterativeInverseInternal(config: IterativeInverseConfig, order: Int): CoordinateMatrix = {
+    val algorithmName = s"iterativeInverse(order=$order)"
+    require(order >= 2, s"Iterative inverse order must be at least 2. Got order=$order.")
     require(!config.useCheckpoints || matrix.entries.sparkContext.getCheckpointDir.isDefined,
-      "Checkpointing dir has to be set when useCheckpoints=true!")
-    require(matrix.numRows() == matrix.numCols(), "Matrix has to be square!")
+      "Checkpoint directory must be configured when useCheckpoints=true. " +
+      "Use sc.setCheckpointDir() to set the checkpoint directory.")
+    require(matrix.numRows() == matrix.numCols(), 
+      s"Matrix must be square for inversion. Found ${matrix.numRows()} rows and ${matrix.numCols()} columns.")
 
     val storageLevel = config.tuning.persistLevel
     val effectiveCheckpointEvery = effectiveIterativeCheckpointEvery(config)
@@ -305,7 +308,7 @@ final class CoordinateMatrixOps private[sparkinverse] (val matrix: CoordinateMat
   }
 
   def iterativeInverse(order: Int = 2, config: IterativeInverseConfig = IterativeInverseConfig()): CoordinateMatrix =
-    hyperpowerInverseInternal(config, order, algorithmName = s"iterativeInverse(order=$order)")
+    iterativeInverseInternal(config, order)
 
   def multiply(other: CoordinateMatrix): CoordinateMatrix = multiply(matrix, other)
 
