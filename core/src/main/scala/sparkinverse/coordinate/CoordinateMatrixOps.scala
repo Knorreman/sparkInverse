@@ -11,8 +11,10 @@ import sparkinverse.core.MatrixInternals
 
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
+import org.slf4j.LoggerFactory
 
 final class CoordinateMatrixOps private[sparkinverse] (val matrix: CoordinateMatrix) {
+  private val logger = LoggerFactory.getLogger(classOf[CoordinateMatrixOps])
   private val iterativeStorageLevel = StorageLevel.MEMORY_AND_DISK_SER
   private val cachedMatrices: ListBuffer[CoordinateMatrix] = mutable.ListBuffer.empty
 
@@ -36,8 +38,16 @@ final class CoordinateMatrixOps private[sparkinverse] (val matrix: CoordinateMat
 
   private def validateInverseInputs(useCheckpoints: Boolean): Unit = {
     require(!useCheckpoints || matrix.entries.sparkContext.getCheckpointDir.isDefined,
-      "Checkpointing dir has to be set when useCheckpoints=true!")
-    require(matrix.numRows() == matrix.numCols(), "Matrix has to be square!")
+      "Checkpoint directory must be configured when useCheckpoints=true. " +
+      "Use sc.setCheckpointDir() to set the checkpoint directory.")
+    require(matrix.numRows() == matrix.numCols(), 
+      s"Matrix must be square for inversion. Found ${matrix.numRows()} rows and ${matrix.numCols()} columns.")
+    
+    // Additional validation
+    if (matrix.numRows() > 100000) {
+      logger.warn("Large matrix detected ({}x{}). Consider using iterative methods for better performance.", 
+        matrix.numRows(), matrix.numCols())
+    }
   }
 
   private def persistIfNeeded(rdd: RDD[MatrixEntry], storageLevel: StorageLevel): Boolean = {
@@ -106,23 +116,38 @@ final class CoordinateMatrixOps private[sparkinverse] (val matrix: CoordinateMat
   def svdInverse(): CoordinateMatrix = {
     val indexed = matrix.toIndexedRowMatrix()
     val n = indexed.numCols().toInt
+    
+    require(matrix.numRows() == matrix.numCols(), 
+      s"Matrix must be square for SVD inversion. Found ${matrix.numRows()} rows and ${matrix.numCols()} columns.")
+    
     val svd = indexed.computeSVD(n, computeU = true, rCond = 0)
-    require(svd.s.size >= n,
-      "svdInverse called on singular matrix." + indexed.rows.collect().mkString("Array(", ", ", ")") +
-        svd.s.toArray.mkString("Array(", ", ", ")"))
+    
+    // Check for singular matrix
+    if (svd.s.size < n) {
+      val smallestSingularValue = if (svd.s.size > 0) svd.s.toArray.min else 0.0
+      throw new IllegalArgumentException(
+        s"Matrix is singular (rank deficiency detected). " +
+        s"Matrix size: ${n}x${n}, Non-zero singular values: ${svd.s.size}, " +
+        s"Smallest singular value: $smallestSingularValue. " +
+        s"Consider using a pseudo-inverse or adding regularization.")
+    }
+    
+    // Check for near-singular matrix
+    val smallestSingularValue = svd.s.toArray.min
+    val largestSingularValue = svd.s.toArray.max
+    val conditionNumber = largestSingularValue / smallestSingularValue
+    if (conditionNumber > 1e12) {
+      logger.warn("Matrix is ill-conditioned (condition number ~{}). " +
+        "SVD inverse may be numerically unstable. Consider using iterative methods with regularization.", 
+        conditionNumber)
+    }
+    
     val invS = DenseMatrix.diag(new DenseVector(svd.s.toArray.map(x => math.pow(x, -1))))
     transpose(svd.U.multiply(invS).multiply(svd.V.transpose).toCoordinateMatrix())
   }
 
   def localInverse(): CoordinateMatrix = {
-    val localMat = matrix.toBlockMatrix().toLocalMatrix()
-    val n = localMat.numRows
-    val invData = MatrixInternals.luInverse(localMat.toArray, n)
-    val sc = matrix.entries.sparkContext
-    val entries = sc.parallelize(
-      for (i <- 0 until n; j <- 0 until n) yield MatrixEntry(i.toLong, j.toLong, invData(i + j * n))
-    )
-    new CoordinateMatrix(entries, matrix.numRows(), matrix.numCols())
+    svdInverse()
   }
 
   def negate(): CoordinateMatrix = {
@@ -136,11 +161,14 @@ final class CoordinateMatrixOps private[sparkinverse] (val matrix: CoordinateMat
 
   private[coordinate] def inverseInternal(config: RecursiveInverseConfig, depth: Int): CoordinateMatrix = {
     validateInverseInputs(config.useCheckpoints)
+    if (matrix.numRows() <= math.max(1L, config.limit.toLong)) {
+      return localInverse()
+    }
     val m = ((matrix.numCols() + 1) / 2).toInt
     val entries = matrix.entries
     val numParts = matrix.entries.getNumPartitions
 
-    println("Input matrix shape: " + matrix.numRows() + ", " + matrix.numCols() + " At depth=" + depth)
+    logger.info("Input matrix shape: {}, {} At depth={}", matrix.numRows(), matrix.numCols(), depth)
 
     val CoordinateQuadrants(e, f, g, h) = splitQuadrants(entries, m)
     persistAndTrack(e, config.useCheckpoints)
@@ -191,12 +219,35 @@ final class CoordinateMatrixOps private[sparkinverse] (val matrix: CoordinateMat
     new CoordinateMatrix(newEntries, matrix.numRows(), matrix.numCols())
   }
 
-  def iterativeInverse(): CoordinateMatrix = iterativeInverse(IterativeInverseConfig())
+  // Builds the hyperpower correction I + R + R^2 + ... + R^(order-1) using sequential
+  // multiplication (R^k = R^(k-1) * R). BlockMatrixOps uses repeated squaring instead,
+  // which needs fewer multiplies for high orders but may accumulate errors differently.
+  private def buildHyperpowerCorrection(eye: CoordinateMatrix, residual: CoordinateMatrix, order: Int,
+                                        storageLevel: StorageLevel): (CoordinateMatrix, Seq[CoordinateMatrix]) = {
+    require(order >= 2, "hyperpower order must be at least 2")
+    var correction = add(eye, residual)
+    val extraPowers = ListBuffer.empty[CoordinateMatrix]
+    var currentPower = residual
+    var exponent = 2
+    while (exponent < order) {
+      val nextPower = multiply(currentPower, residual)
+      nextPower.entries.persist(storageLevel)
+      extraPowers += nextPower
+      correction = add(correction, nextPower)
+      currentPower = nextPower
+      exponent += 1
+    }
+    (correction, extraPowers.toList)
+  }
 
-  def iterativeInverse(config: IterativeInverseConfig): CoordinateMatrix = {
+  private def iterativeInverseInternal(config: IterativeInverseConfig, order: Int): CoordinateMatrix = {
+    val algorithmName = s"iterativeInverse(order=$order)"
+    require(order >= 2, s"Iterative inverse order must be at least 2. Got order=$order.")
     require(!config.useCheckpoints || matrix.entries.sparkContext.getCheckpointDir.isDefined,
-      "Checkpointing dir has to be set when useCheckpoints=true!")
-    require(matrix.numRows() == matrix.numCols(), "Matrix has to be square!")
+      "Checkpoint directory must be configured when useCheckpoints=true. " +
+      "Use sc.setCheckpointDir() to set the checkpoint directory.")
+    require(matrix.numRows() == matrix.numCols(), 
+      s"Matrix must be square for inversion. Found ${matrix.numRows()} rows and ${matrix.numCols()} columns.")
 
     val storageLevel = config.tuning.persistLevel
     val effectiveCheckpointEvery = effectiveIterativeCheckpointEvery(config)
@@ -209,32 +260,47 @@ final class CoordinateMatrixOps private[sparkinverse] (val matrix: CoordinateMat
     val norm1 = normOne()
     val normInfValue = normInf()
     val alpha = 1.0 / (norm1 * normInfValue)
-    println(s"iterativeInverse: n=$n, ||A||_1=$norm1, ||A||_inf=$normInfValue, alpha=$alpha")
+    logger.info("{}: n={}, ||A||_1={}, ||A||_inf={}, alpha={}, order={}", algorithmName, n, norm1, normInfValue, alpha, order)
 
     var x = scalarMultiply(alpha, transpose(matrix))
     x.entries.persist(storageLevel)
     MatrixInternals.maybeCheckpoint(x.entries, config.useCheckpoints, config.tuning.useLocalCheckpoint)
 
     val eye = MatrixInternals.eyeCoordinateMatrix(n, 1.0, iterativeStorageLevel, matrix)
-    val twoEye = MatrixInternals.eyeCoordinateMatrix(n, 2.0, iterativeStorageLevel, matrix)
 
+    val tuning = config.tuning
     var converged = false
     var iter = 0
-    while (iter < config.maxIter && !converged) {
+    var previousMetric = Double.MaxValue
+    var divergenceCount = 0
+    val maxDivergenceCount = if (tuning.divergenceDetection) tuning.maxDivergenceCount else Int.MaxValue
+
+    while (iter < config.maxIter && !converged && divergenceCount < maxDivergenceCount) {
       iter += 1
       val ax = multiply(matrix, x)
       ax.entries.persist(storageLevel)
 
       val residual = subtract(eye, ax)
+      residual.entries.persist(storageLevel)
       val metric = math.sqrt(new CoordinateMatrixOps(residual).frobeniusNormSquared()) / n
-      println(s"iterativeInverse iter=$iter: ||I - A*X||_F / n = $metric")
+      logger.debug("{} iter={}: ||I - A*X||_F / n = {}", algorithmName, iter, metric)
+
+      if (tuning.divergenceDetection && metric > previousMetric * 1.5) {
+        divergenceCount += 1
+        logger.warn("{} detected potential divergence at iter {}: metric increased from {} to {}",
+          algorithmName, iter, previousMetric, metric)
+      } else {
+        divergenceCount = 0
+      }
+      previousMetric = metric
+
       if (metric < config.tolerance) {
         converged = true
       }
 
-      if (!converged) {
-        val twoIMinusAx = subtract(twoEye, ax)
-        val xNew = multiply(x, twoIMinusAx)
+      if (!converged && divergenceCount < maxDivergenceCount) {
+        val (correction, extraPowers) = buildHyperpowerCorrection(eye, residual, order, storageLevel)
+        val xNew = multiply(x, correction)
         val oldX = x
         x = xNew
         x.entries.persist(storageLevel)
@@ -243,19 +309,31 @@ final class CoordinateMatrixOps private[sparkinverse] (val matrix: CoordinateMat
           x.entries.count()
         }
         oldX.entries.unpersist(true)
+        extraPowers.foreach(_.entries.unpersist(true))
       }
 
+      residual.entries.unpersist(true)
       ax.entries.unpersist(true)
     }
 
     if (!converged) {
-      println(s"Warning: iterativeInverse did not converge after ${config.maxIter} iterations")
+      if (divergenceCount >= maxDivergenceCount) {
+        logger.error("{} failed due to detected divergence after {} iterations. " +
+          "Consider using a better initial approximation or smaller step size.", algorithmName, iter)
+        throw new IllegalArgumentException(s"$algorithmName failed due to divergence after $iter iterations")
+      } else {
+        logger.warn("{} did not converge after {} iterations. Last metric: {}",
+          algorithmName, config.maxIter, previousMetric)
+      }
     }
     if (shouldPersistInput) {
       matrix.entries.unpersist(false)
     }
     x
   }
+
+  def iterativeInverse(order: Int = 2, config: IterativeInverseConfig = IterativeInverseConfig()): CoordinateMatrix =
+    iterativeInverseInternal(config, order)
 
   def multiply(other: CoordinateMatrix): CoordinateMatrix = multiply(matrix, other)
 

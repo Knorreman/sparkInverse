@@ -31,6 +31,7 @@ If you want source dependencies directly, the reusable module is the `core` subp
 import sparkinverse.api.MatrixInversion
 
 val inverse = MatrixInversion.block(blockMatrix).inverse()
+val cubicInverse = MatrixInversion.block(blockMatrix).iterativeInverse(3)
 val pseudoInverse = MatrixInversion.coordinate(coordinateMatrix).leftPseudoInverse()
 ```
 
@@ -60,6 +61,15 @@ val inverse = MatrixInversion.block(blockMatrix).iterativeInverse(
     checkpointInterval = 5
   )
 )
+
+val cubicInverse = MatrixInversion.block(blockMatrix).iterativeInverse(
+  3,
+  IterativeInverseConfig(
+    maxIter = 20,
+    tolerance = 1e-10,
+    checkpointInterval = 5
+  )
+)
 ```
 
 ### Optional Syntax Imports
@@ -71,6 +81,7 @@ import sparkinverse.syntax.block._
 import sparkinverse.syntax.coordinate._
 
 val blockInverse = blockMatrix.inverse()
+val cubicInverse = blockMatrix.iterativeInverse(3)
 val coordinateInverse = coordinateMatrix.iterativeInverse()
 ```
 
@@ -79,7 +90,7 @@ val coordinateInverse = coordinateMatrix.iterativeInverse()
 For `BlockMatrix` and `CoordinateMatrix`:
 
 - `inverse`
-- `iterativeInverse`
+- `iterativeInverse` (supports higher-order hyperpower via `order` parameter)
 - `localInverse`
 - `svdInverse`
 - `leftPseudoInverse`
@@ -120,6 +131,7 @@ Additional distributed arithmetic helpers for `CoordinateMatrix` are available t
 
 - Use recursive inversion as the default general-purpose algorithm.
 - Use iterative inversion when the matrix is well-conditioned enough for Newton-Schulz to converge quickly.
+- Use `iterativeInverse(3)` (cubic hyperpower) when you want a higher-order iterative method that may need fewer iterations than Newton-Schulz at the cost of extra matrix multiplies per step.
 - Use `localInverse` or `svdInverse` only for matrices small enough to collect to the driver.
 
 ## Benchmarks
@@ -130,7 +142,7 @@ The benchmark app now lives in `bench`:
 sbt bench/run
 ```
 
-The benchmark is intentionally simple: it runs a small fixed set of matrix sizes with a hand-picked config for Schur complement and Newton-Schulz, and each timed section forces Spark execution before recording the result.
+The benchmark is intentionally simple: it runs a small fixed set of matrix sizes with a hand-picked config for Schur complement, third-order hyperpower iteration, fourth-order hyperpower iteration, and Newton-Schulz, and each timed section forces Spark execution before recording the result.
 
 ## Tests
 

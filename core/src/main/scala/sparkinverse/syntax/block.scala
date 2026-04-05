@@ -7,8 +7,8 @@ object block {
   implicit class BlockMatrixSyntax(private val matrix: BlockMatrix) extends AnyVal {
     def inverse(): BlockMatrix = MatrixInversion.block(matrix).inverse()
     def inverse(config: RecursiveInverseConfig): BlockMatrix = MatrixInversion.block(matrix).inverse(config)
-    def iterativeInverse(): BlockMatrix = MatrixInversion.block(matrix).iterativeInverse()
-    def iterativeInverse(config: IterativeInverseConfig): BlockMatrix = MatrixInversion.block(matrix).iterativeInverse(config)
+    def iterativeInverse(order: Int = 2, config: IterativeInverseConfig = IterativeInverseConfig()): BlockMatrix = 
+      MatrixInversion.block(matrix).iterativeInverse(order, config)
     def localInverse(): BlockMatrix = MatrixInversion.block(matrix).localInverse()
     def svdInverse(): BlockMatrix = MatrixInversion.block(matrix).svdInverse()
     def leftPseudoInverse(): BlockMatrix = MatrixInversion.block(matrix).leftPseudoInverse()

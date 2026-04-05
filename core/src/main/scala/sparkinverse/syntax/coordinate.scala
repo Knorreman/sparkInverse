@@ -8,8 +8,8 @@ object coordinate {
   implicit class CoordinateMatrixSyntax(private val matrix: CoordinateMatrix) extends AnyVal {
     def inverse(): CoordinateMatrix = MatrixInversion.coordinate(matrix).inverse()
     def inverse(config: RecursiveInverseConfig): CoordinateMatrix = MatrixInversion.coordinate(matrix).inverse(config)
-    def iterativeInverse(): CoordinateMatrix = MatrixInversion.coordinate(matrix).iterativeInverse()
-    def iterativeInverse(config: IterativeInverseConfig): CoordinateMatrix = MatrixInversion.coordinate(matrix).iterativeInverse(config)
+    def iterativeInverse(order: Int = 2, config: IterativeInverseConfig = IterativeInverseConfig()): CoordinateMatrix = 
+      MatrixInversion.coordinate(matrix).iterativeInverse(order, config)
     def localInverse(): CoordinateMatrix = MatrixInversion.coordinate(matrix).localInverse()
     def svdInverse(): CoordinateMatrix = MatrixInversion.coordinate(matrix).svdInverse()
     def leftPseudoInverse(): CoordinateMatrix = MatrixInversion.coordinate(matrix).leftPseudoInverse()
