@@ -13,7 +13,6 @@ import scala.collection.mutable.{ArrayBuffer, ListBuffer}
 import org.slf4j.LoggerFactory
 
 private[block] object BlockMatrixOps {
-  private val logger = LoggerFactory.getLogger(classOf[BlockMatrixOps])
   final case class MidTaggedBlock(blockIndex: Int, block: Matrix, isLeftRole: Boolean)
   final case class MidBlockBuffers(left: ArrayBuffer[(Int, Matrix)], right: ArrayBuffer[(Int, Matrix)])
 
@@ -53,20 +52,9 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     persistAndTrack(mat, useCheckpoints, shouldPersist(mat))
   }
 
-  private def shouldPersist(mat: BlockMatrix): Boolean = {
-    // Estimate memory usage: each element is 8 bytes (double)
+  private def shouldPersist(mat: BlockMatrix, threshold: Int = 1000000): Boolean = {
     val estimatedElements = mat.numRows() * mat.numCols()
-    // Use configuration threshold if available, otherwise use default
-    val threshold = 1000000 // Default: 1M elements
     estimatedElements > threshold
-  }
-
-  private def estimateConditionNumber(): Double = {
-    val n1 = normOne()
-    val nInf = normInf()
-    // Simple condition number estimate using norm products
-    // This is not exact but gives an indication of conditioning
-    n1 * nInf
   }
 
   private def computeImprovedInitialAlpha(conditionThreshold: Double = 1e6): Double = {
@@ -322,32 +310,28 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     val res = matrix.numRows() - splitSize
     val BlockQuadrants(e, f, g, h) = splitQuadrants(m, splitSize, res)
     
-    // Smart persistence: only persist large matrices
-    val shouldPersistE = shouldPersist(e)
-    val shouldPersistF = shouldPersist(f)
-    val shouldPersistG = shouldPersist(g)
-    val shouldPersistH = shouldPersist(h)
-    
-    persistAndTrack(e, config.useCheckpoints, shouldPersistE)
-    persistAndTrack(f, config.useCheckpoints, shouldPersistF)
-    persistAndTrack(g, config.useCheckpoints, shouldPersistG)
-    persistAndTrack(h, config.useCheckpoints, shouldPersistH)
+    val persistThreshold = config.tuning.minBlockSizeForPersistence
+
+    persistAndTrack(e, config.useCheckpoints, shouldPersist(e, persistThreshold))
+    persistAndTrack(f, config.useCheckpoints, shouldPersist(f, persistThreshold))
+    persistAndTrack(g, config.useCheckpoints, shouldPersist(g, persistThreshold))
+    persistAndTrack(h, config.useCheckpoints, shouldPersist(h, persistThreshold))
 
     val recurseThresholdInBlocks = math.max(1, config.limit / colsPerBlock)
     val eInv = invertPartition(e, m, recurseThresholdInBlocks, config, depth, "E_inv")
     val geInv = withName(g.multiply(eInv, midSplits), "GE_inv")
     val eInvF = withName(eInv.multiply(f, midSplits), "E_invF")
-    persistAndTrack(geInv, config.useCheckpoints, shouldPersist(geInv))
-    persistAndTrack(eInvF, config.useCheckpoints, shouldPersist(eInvF))
+    persistAndTrack(geInv, config.useCheckpoints, shouldPersist(geInv, persistThreshold))
+    persistAndTrack(eInvF, config.useCheckpoints, shouldPersist(eInvF, persistThreshold))
 
     val schur = withName(h.subtract(g.multiply(eInvF, midSplits)), "S")
-    persistAndTrack(schur, config.useCheckpoints, shouldPersist(schur))
+    persistAndTrack(schur, config.useCheckpoints, shouldPersist(schur, persistThreshold))
 
     val sInv = invertPartition(schur, m, recurseThresholdInBlocks, config, depth, "S_inv")
     val sInvGeInv = withName(sInv.multiply(geInv, midSplits), "S_invGE_inv")
     val eInvFSInv = withName(eInvF.multiply(sInv, midSplits), "E_invFS_inv")
-    persistAndTrack(sInvGeInv, config.useCheckpoints, shouldPersist(sInvGeInv))
-    persistAndTrack(eInvFSInv, config.useCheckpoints, shouldPersist(eInvFSInv))
+    persistAndTrack(sInvGeInv, config.useCheckpoints, shouldPersist(sInvGeInv, persistThreshold))
+    persistAndTrack(eInvFSInv, config.useCheckpoints, shouldPersist(eInvFSInv, persistThreshold))
 
     val topLeft = eInv.add(eInvFSInv.multiply(geInv, midSplits))
     val sc = topLeft.blocks.sparkContext
@@ -484,6 +468,10 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
   private[sparkinverse] def squareBlocks(numMidDimSplits: Int): BlockMatrix =
     squareMultiply(matrix, numMidDimSplits)
 
+  // Builds residual powers R^2 .. R^(maxExponent) using repeated squaring to
+  // minimize multiply calls (e.g. R^4 = (R^2)^2 needs 2 multiplies instead of 3).
+  // CoordinateMatrixOps uses sequential multiplication instead, which may
+  // accumulate floating-point errors differently but is simpler for sparse data.
   private def buildHyperpowerPowers(residual: BlockMatrix, maxExponent: Int,
                                     midSplits: Int, storageLevel: StorageLevel): Seq[BlockMatrix] = {
     if (maxExponent < 2) {

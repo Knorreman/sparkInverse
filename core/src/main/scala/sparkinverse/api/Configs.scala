@@ -6,11 +6,7 @@ final case class RecursiveTuning(
   targetOutputPartitions: Option[Int] = None,
   unionCoalesceThreshold: Int = 8,
   adaptiveMidDimSplits: Boolean = true,
-  adaptivePersistence: Boolean = true,
-  minBlockSizeForPersistence: Int = 1000000, // Minimum elements for persistence
-  conditionNumberThreshold: Double = 1e6, // Threshold for ill-conditioning detection
-  divergenceDetection: Boolean = true,
-  maxDivergenceCount: Int = 3
+  minBlockSizeForPersistence: Int = 1000000
 )
 
 final case class IterativeTuning(
@@ -24,8 +20,7 @@ final case class IterativeTuning(
   adaptiveStepSize: Boolean = true,
   conditionNumberThreshold: Double = 1e6,
   divergenceDetection: Boolean = true,
-  maxDivergenceCount: Int = 3,
-  conservativeInitialization: Boolean = true
+  maxDivergenceCount: Int = 3
 )
 
 final case class RecursiveInverseConfig(

@@ -46,7 +46,6 @@ object Main {
 
   def buildMatrix(sc: SparkContext, n: Int, blockSize: Int, seed: Long): BlockMatrix = {
     val lnrdd = RandomRDDs.normalVectorRDD(sc, numRows = n, numCols = n, seed = seed, numPartitions = 8)
-//    val lnrdd = RandomRDDs.poissonVectorRDD(sc, mean = 0.01, numRows = n, numCols = n, seed = seed, numPartitions = 8)
       .zipWithIndex()
       .map(_.swap)
       .map(x => IndexedRow(x._1, x._2))
@@ -122,7 +121,7 @@ object Main {
     schurMat.blocks.unpersist(true)
     schurInv.blocks.unpersist(true)
 
-println("\n[Third-order iterative inversion (order=3)]")
+    println("\n[Third-order iterative inversion (order=3)]")
     val hp3Config = IterativeInverseConfig(
       maxIter = iterMaxIter,
       tolerance = iterTol,
@@ -133,7 +132,7 @@ println("\n[Third-order iterative inversion (order=3)]")
     val (hp3Sec, hp3Mat, hp3Inv) =
       runOnce(sc, config.n, config.nsBlockSize)(mat => MatrixInversion.block(mat).iterativeInverse(3, hp3Config))
     val hp3Rmse = computeRmse(hp3Mat, hp3Inv, config.nsMidSplits)
-    println(f"  time=${hp3Sec}%.2fsRMSE=$hp3Rmse%.3e")
+    println(f"  time=${hp3Sec}%.2fs  RMSE=$hp3Rmse%.3e")
     hp3Mat.blocks.unpersist(true)
     hp3Inv.blocks.unpersist(true)
 
@@ -231,8 +230,7 @@ println("\n[Third-order iterative inversion (order=3)]")
     val configs = Seq(
       BenchConfig(n = 1000, schurBlockSize = 125, nsBlockSize = 125, schurLimit = 250, schurMidSplits = 2, nsMidSplits = 2),
       BenchConfig(n = 4000, schurBlockSize = 250, nsBlockSize = 250, schurLimit = 500, schurMidSplits = 4, nsMidSplits = 4),
-      BenchConfig(n = 6000, schurBlockSize = 300, nsBlockSize = 300, schurLimit = 600, schurMidSplits = 4, nsMidSplits = 4),
-//      BenchConfig(n = 10000, schurBlockSize = 250, nsBlockSize = 500, schurLimit = 500, schurMidSplits = 4, nsMidSplits = 4)
+      BenchConfig(n = 6000, schurBlockSize = 300, nsBlockSize = 300, schurLimit = 600, schurMidSplits = 4, nsMidSplits = 4)
     )
 
     val results = configs.map { config =>

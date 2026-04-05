@@ -219,6 +219,9 @@ final class CoordinateMatrixOps private[sparkinverse] (val matrix: CoordinateMat
     new CoordinateMatrix(newEntries, matrix.numRows(), matrix.numCols())
   }
 
+  // Builds the hyperpower correction I + R + R^2 + ... + R^(order-1) using sequential
+  // multiplication (R^k = R^(k-1) * R). BlockMatrixOps uses repeated squaring instead,
+  // which needs fewer multiplies for high orders but may accumulate errors differently.
   private def buildHyperpowerCorrection(eye: CoordinateMatrix, residual: CoordinateMatrix, order: Int,
                                         storageLevel: StorageLevel): (CoordinateMatrix, Seq[CoordinateMatrix]) = {
     require(order >= 2, "hyperpower order must be at least 2")
@@ -265,9 +268,14 @@ final class CoordinateMatrixOps private[sparkinverse] (val matrix: CoordinateMat
 
     val eye = MatrixInternals.eyeCoordinateMatrix(n, 1.0, iterativeStorageLevel, matrix)
 
+    val tuning = config.tuning
     var converged = false
     var iter = 0
-    while (iter < config.maxIter && !converged) {
+    var previousMetric = Double.MaxValue
+    var divergenceCount = 0
+    val maxDivergenceCount = if (tuning.divergenceDetection) tuning.maxDivergenceCount else Int.MaxValue
+
+    while (iter < config.maxIter && !converged && divergenceCount < maxDivergenceCount) {
       iter += 1
       val ax = multiply(matrix, x)
       ax.entries.persist(storageLevel)
@@ -276,11 +284,21 @@ final class CoordinateMatrixOps private[sparkinverse] (val matrix: CoordinateMat
       residual.entries.persist(storageLevel)
       val metric = math.sqrt(new CoordinateMatrixOps(residual).frobeniusNormSquared()) / n
       logger.debug("{} iter={}: ||I - A*X||_F / n = {}", algorithmName, iter, metric)
+
+      if (tuning.divergenceDetection && metric > previousMetric * 1.5) {
+        divergenceCount += 1
+        logger.warn("{} detected potential divergence at iter {}: metric increased from {} to {}",
+          algorithmName, iter, previousMetric, metric)
+      } else {
+        divergenceCount = 0
+      }
+      previousMetric = metric
+
       if (metric < config.tolerance) {
         converged = true
       }
 
-      if (!converged) {
+      if (!converged && divergenceCount < maxDivergenceCount) {
         val (correction, extraPowers) = buildHyperpowerCorrection(eye, residual, order, storageLevel)
         val xNew = multiply(x, correction)
         val oldX = x
@@ -299,7 +317,14 @@ final class CoordinateMatrixOps private[sparkinverse] (val matrix: CoordinateMat
     }
 
     if (!converged) {
-      logger.warn("{} did not converge after {} iterations", algorithmName, config.maxIter)
+      if (divergenceCount >= maxDivergenceCount) {
+        logger.error("{} failed due to detected divergence after {} iterations. " +
+          "Consider using a better initial approximation or smaller step size.", algorithmName, iter)
+        throw new IllegalArgumentException(s"$algorithmName failed due to divergence after $iter iterations")
+      } else {
+        logger.warn("{} did not converge after {} iterations. Last metric: {}",
+          algorithmName, config.maxIter, previousMetric)
+      }
     }
     if (shouldPersistInput) {
       matrix.entries.unpersist(false)

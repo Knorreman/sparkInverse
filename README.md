@@ -31,7 +31,7 @@ If you want source dependencies directly, the reusable module is the `core` subp
 import sparkinverse.api.MatrixInversion
 
 val inverse = MatrixInversion.block(blockMatrix).inverse()
-val cubicInverse = MatrixInversion.block(blockMatrix).hyperpowerInverse()
+val cubicInverse = MatrixInversion.block(blockMatrix).iterativeInverse(3)
 val pseudoInverse = MatrixInversion.coordinate(coordinateMatrix).leftPseudoInverse()
 ```
 
@@ -62,7 +62,8 @@ val inverse = MatrixInversion.block(blockMatrix).iterativeInverse(
   )
 )
 
-val cubicInverse = MatrixInversion.block(blockMatrix).hyperpowerInverse(
+val cubicInverse = MatrixInversion.block(blockMatrix).iterativeInverse(
+  3,
   IterativeInverseConfig(
     maxIter = 20,
     tolerance = 1e-10,
@@ -80,7 +81,7 @@ import sparkinverse.syntax.block._
 import sparkinverse.syntax.coordinate._
 
 val blockInverse = blockMatrix.inverse()
-val cubicInverse = blockMatrix.hyperpowerInverse()
+val cubicInverse = blockMatrix.iterativeInverse(3)
 val coordinateInverse = coordinateMatrix.iterativeInverse()
 ```
 
@@ -89,8 +90,7 @@ val coordinateInverse = coordinateMatrix.iterativeInverse()
 For `BlockMatrix` and `CoordinateMatrix`:
 
 - `inverse`
-- `iterativeInverse`
-- `hyperpowerInverse`
+- `iterativeInverse` (supports higher-order hyperpower via `order` parameter)
 - `localInverse`
 - `svdInverse`
 - `leftPseudoInverse`
@@ -131,7 +131,7 @@ Additional distributed arithmetic helpers for `CoordinateMatrix` are available t
 
 - Use recursive inversion as the default general-purpose algorithm.
 - Use iterative inversion when the matrix is well-conditioned enough for Newton-Schulz to converge quickly.
-- Use `hyperpowerInverse` when you want a cubic iterative method that may need fewer iterations than Newton-Schulz at the cost of extra matrix multiplies per step.
+- Use `iterativeInverse(3)` (cubic hyperpower) when you want a higher-order iterative method that may need fewer iterations than Newton-Schulz at the cost of extra matrix multiplies per step.
 - Use `localInverse` or `svdInverse` only for matrices small enough to collect to the driver.
 
 ## Benchmarks
