@@ -1,24 +1,25 @@
 package sparkinverse.syntax
 
 import org.apache.spark.mllib.linalg.distributed.BlockMatrix
-import sparkinverse.api.{IterativeInverseConfig, MatrixInversion, RecursiveInverseConfig}
+import sparkinverse.api.{IterativeInverseConfig, PseudoInverseSide, RecursiveInverseConfig}
+import sparkinverse.block.BlockMatrixOps
 
 object block {
   implicit class BlockMatrixSyntax(private val matrix: BlockMatrix) extends AnyVal {
-    def inverse(): BlockMatrix = MatrixInversion.block(matrix).inverse()
-    def inverse(config: RecursiveInverseConfig): BlockMatrix = MatrixInversion.block(matrix).inverse(config)
-    def iterativeInverse(order: Int = 2, config: IterativeInverseConfig = IterativeInverseConfig()): BlockMatrix = 
-      MatrixInversion.block(matrix).iterativeInverse(order, config)
-    def localInverse(): BlockMatrix = MatrixInversion.block(matrix).localInverse()
-    def svdInverse(): BlockMatrix = MatrixInversion.block(matrix).svdInverse()
-    def leftPseudoInverse(): BlockMatrix = MatrixInversion.block(matrix).leftPseudoInverse()
-    def leftPseudoInverse(config: RecursiveInverseConfig): BlockMatrix = MatrixInversion.block(matrix).leftPseudoInverse(config)
-    def rightPseudoInverse(): BlockMatrix = MatrixInversion.block(matrix).rightPseudoInverse()
-    def rightPseudoInverse(config: RecursiveInverseConfig): BlockMatrix = MatrixInversion.block(matrix).rightPseudoInverse(config)
-    def normOne(): Double = MatrixInversion.block(matrix).normOne()
-    def normInf(): Double = MatrixInversion.block(matrix).normInf()
-    def frobeniusNormSquared(): Double = MatrixInversion.block(matrix).frobeniusNormSquared()
-    def scalarMultiply(scalar: Double): BlockMatrix = MatrixInversion.block(matrix).scalarMultiply(scalar)
-    def negate(): BlockMatrix = MatrixInversion.block(matrix).negate()
+    private def ops: BlockMatrixOps = new BlockMatrixOps(matrix)
+
+    def inverse(): BlockMatrix = ops.inverse()
+    def inverse(config: RecursiveInverseConfig): BlockMatrix = ops.inverse(config)
+    def iterativeInverse(config: IterativeInverseConfig = IterativeInverseConfig()): BlockMatrix =
+      ops.iterativeInverse(config)
+    def localInverse(): BlockMatrix = ops.localInverse()
+    def svdInverse(): BlockMatrix = ops.svdInverse()
+    def pseudoInverse(side: PseudoInverseSide): BlockMatrix = ops.pseudoInverse(side)
+    def pseudoInverse(side: PseudoInverseSide, config: RecursiveInverseConfig): BlockMatrix = ops.pseudoInverse(side, config)
+    def normOne(): Double = ops.normOne()
+    def normInf(): Double = ops.normInf()
+    def frobeniusNormSquared(): Double = ops.frobeniusNormSquared()
+    def scalarMultiply(scalar: Double): BlockMatrix = ops.scalarMultiply(scalar)
+    def negate(): BlockMatrix = ops.negate()
   }
 }

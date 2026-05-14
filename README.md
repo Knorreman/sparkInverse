@@ -25,26 +25,29 @@ If you want source dependencies directly, the reusable module is the `core` subp
 
 ## Quick Start
 
-### Facade API
+### Syntax API
 
 ```scala
-import sparkinverse.api.MatrixInversion
+import sparkinverse.api.{IterativeInverseConfig, PseudoInverseSide, RecursiveInverseConfig}
+import sparkinverse.syntax.block._
+import sparkinverse.syntax.coordinate._
 
-val inverse = MatrixInversion.block(blockMatrix).inverse()
-val cubicInverse = MatrixInversion.block(blockMatrix).iterativeInverse(3)
-val pseudoInverse = MatrixInversion.coordinate(coordinateMatrix).leftPseudoInverse()
+val inverse = blockMatrix.inverse()
+val cubicInverse = blockMatrix.iterativeInverse(IterativeInverseConfig(order = 3))
+val pseudoInverse = coordinateMatrix.pseudoInverse(PseudoInverseSide.Left)
 ```
 
 ### Configured Inversion
 
 ```scala
-import sparkinverse.api.{MatrixInversion, RecursiveInverseConfig}
+import sparkinverse.api.RecursiveInverseConfig
 
-val inverse = MatrixInversion.block(blockMatrix).inverse(
+val inverse = blockMatrix.inverse(
   RecursiveInverseConfig(
     limit = 4096,
-    numMidDimSplits = 4,
-    useCheckpoints = true
+    midSplits = 4,
+    useCheckpoints = true,
+    targetOutputPartitions = Some(64)
   )
 )
 ```
@@ -52,37 +55,35 @@ val inverse = MatrixInversion.block(blockMatrix).inverse(
 ### Iterative Inversion
 
 ```scala
-import sparkinverse.api.{IterativeInverseConfig, MatrixInversion}
+import sparkinverse.api.IterativeInverseConfig
 
-val inverse = MatrixInversion.block(blockMatrix).iterativeInverse(
+val inverse = blockMatrix.iterativeInverse(
   IterativeInverseConfig(
+    order = 2,
     maxIter = 30,
     tolerance = 1e-10,
-    checkpointInterval = 5
+    checkpointEvery = 5
   )
 )
 
-val cubicInverse = MatrixInversion.block(blockMatrix).iterativeInverse(
-  3,
+val cubicInverse = blockMatrix.iterativeInverse(
   IterativeInverseConfig(
+    order = 3,
     maxIter = 20,
     tolerance = 1e-10,
-    checkpointInterval = 5
+    checkpointEvery = 5
   )
 )
 ```
 
-### Optional Syntax Imports
-
-If you prefer extension methods:
+### Migration (Before -> After)
 
 ```scala
-import sparkinverse.syntax.block._
-import sparkinverse.syntax.coordinate._
+// Before
+MatrixInversion.block(blockMatrix).iterativeInverse(3, IterativeInverseConfig(maxIter = 20))
 
-val blockInverse = blockMatrix.inverse()
-val cubicInverse = blockMatrix.iterativeInverse(3)
-val coordinateInverse = coordinateMatrix.iterativeInverse()
+// After
+blockMatrix.iterativeInverse(IterativeInverseConfig(order = 3, maxIter = 20))
 ```
 
 ## Supported Operations
@@ -90,18 +91,17 @@ val coordinateInverse = coordinateMatrix.iterativeInverse()
 For `BlockMatrix` and `CoordinateMatrix`:
 
 - `inverse`
-- `iterativeInverse` (supports higher-order hyperpower via `order` parameter)
+- `iterativeInverse` (set order in `IterativeInverseConfig.order`)
 - `localInverse`
 - `svdInverse`
-- `leftPseudoInverse`
-- `rightPseudoInverse`
+- `pseudoInverse(PseudoInverseSide.Left|Right)`
 - `normOne`
 - `normInf`
 - `frobeniusNormSquared`
 - `scalarMultiply`
 - `negate`
 
-Additional distributed arithmetic helpers for `CoordinateMatrix` are available through the facade and syntax layer:
+Additional distributed arithmetic helpers for `CoordinateMatrix`:
 
 - `multiply`
 - `add`
@@ -114,24 +114,27 @@ Additional distributed arithmetic helpers for `CoordinateMatrix` are available t
 ### RecursiveInverseConfig
 
 - `limit`: local inversion threshold
-- `numMidDimSplits`: Spark matrix-multiply parallelism hint
+- `midSplits`: Spark matrix-multiply parallelism hint
 - `useCheckpoints`: requires `SparkContext#setCheckpointDir`
-- `tuning`: advanced execution tuning and coalescing controls
+- `targetOutputPartitions`: optional output coalesce target
+- `unionCoalesceThreshold`: no-shuffle coalesce trigger threshold
+- `minBlockSizeForPersistence`: skip persistence for tiny intermediates
 
 ### IterativeInverseConfig
 
+- `order`
 - `maxIter`
 - `tolerance`
 - `useCheckpoints`
-- `checkpointInterval`
-- `numMidDimSplits`
-- `tuning`: advanced persistence, checkpoint, and tracing controls
+- `checkpointEvery`
+- `midSplits`
+- `persistLevel`
 
 ## Choosing An Algorithm
 
 - Use recursive inversion as the default general-purpose algorithm.
 - Use iterative inversion when the matrix is well-conditioned enough for Newton-Schulz to converge quickly.
-- Use `iterativeInverse(3)` (cubic hyperpower) when you want a higher-order iterative method that may need fewer iterations than Newton-Schulz at the cost of extra matrix multiplies per step.
+- Use `iterativeInverse(IterativeInverseConfig(order = 3, ...))` for cubic hyperpower when you want fewer iterations at the cost of more multiplies per step.
 - Use `localInverse` or `svdInverse` only for matrices small enough to collect to the driver.
 
 ## Benchmarks
