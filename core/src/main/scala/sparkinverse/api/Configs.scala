@@ -2,39 +2,28 @@ package sparkinverse.api
 
 import org.apache.spark.storage.StorageLevel
 
-final case class RecursiveTuning(
-  targetOutputPartitions: Option[Int] = None,
-  unionCoalesceThreshold: Int = 8,
-  adaptiveMidDimSplits: Boolean = true,
-  minBlockSizeForPersistence: Int = 1000000
-)
+sealed trait PseudoInverseSide
 
-final case class IterativeTuning(
-  persistLevel: StorageLevel = StorageLevel.MEMORY_AND_DISK_SER,
-  checkpointEvery: Int = 5,
-  useLocalCheckpoint: Boolean = false,
-  adaptiveMidDimSplits: Boolean = true,
-  maxAdaptiveMidDimSplits: Int = 16,
-  largeMatrixCheckpointEvery: Int = 2,
-  largeMatrixThreshold: Int = 4000,
-  adaptiveStepSize: Boolean = true,
-  conditionNumberThreshold: Double = 1e6,
-  divergenceDetection: Boolean = true,
-  maxDivergenceCount: Int = 3
-)
+object PseudoInverseSide {
+  case object Left extends PseudoInverseSide
+  case object Right extends PseudoInverseSide
+}
 
 final case class RecursiveInverseConfig(
   limit: Int = 4096,
-  numMidDimSplits: Int = 1,
+  midSplits: Int = 1,
   useCheckpoints: Boolean = true,
-  tuning: RecursiveTuning = RecursiveTuning()
+  targetOutputPartitions: Option[Int] = None,
+  unionCoalesceThreshold: Int = 8,
+  minBlockSizeForPersistence: Int = 1000000
 )
 
 final case class IterativeInverseConfig(
+  order: Int = 2,
   maxIter: Int = 30,
   tolerance: Double = 1e-15,
   useCheckpoints: Boolean = true,
-  checkpointInterval: Int = 5,
-  numMidDimSplits: Int = 1,
-  tuning: IterativeTuning = IterativeTuning()
+  checkpointEvery: Int = 5,
+  midSplits: Int = 1,
+  persistLevel: StorageLevel = StorageLevel.MEMORY_AND_DISK_SER
 )

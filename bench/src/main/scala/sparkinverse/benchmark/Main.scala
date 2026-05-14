@@ -5,7 +5,8 @@ import org.apache.spark.mllib.linalg.{DenseMatrix, DenseVector, Matrix, SparseMa
 import org.apache.spark.mllib.random.RandomRDDs
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.{SparkConf, SparkContext}
-import sparkinverse.api.{IterativeInverseConfig, MatrixInversion, RecursiveInverseConfig, RecursiveTuning}
+import sparkinverse.api.{IterativeInverseConfig, RecursiveInverseConfig}
+import sparkinverse.syntax.block._
 import sparkinverse.syntax.coordinate._
 
 import java.net.URI
@@ -70,9 +71,9 @@ object Main {
     (secs, mat, inv)
   }
 
-  def computeRmse(matrix: BlockMatrix, inv: BlockMatrix, numMidDimSplits: Int): Double = {
+  def computeRmse(matrix: BlockMatrix, inv: BlockMatrix, midSplits: Int): Double = {
     val n = matrix.numRows()
-    val product = matrix.multiply(inv, numMidDimSplits)
+    val product = matrix.multiply(inv, midSplits)
     val rpb = product.rowsPerBlock
     val cpb = product.colsPerBlock
     val errorSq = product.blocks.map { case ((bi, bj), mat) =>
@@ -110,12 +111,11 @@ object Main {
     println("\n[Schur complement recursive inversion]")
     val schurConfig = RecursiveInverseConfig(
       limit = config.schurLimit,
-      numMidDimSplits = config.schurMidSplits,
-      useCheckpoints = true,
-      tuning = RecursiveTuning(adaptiveMidDimSplits = false)
+      midSplits = config.schurMidSplits,
+      useCheckpoints = true
     )
     val (schurSec, schurMat, schurInv) =
-      runOnce(sc, config.n, config.schurBlockSize)(mat => MatrixInversion.block(mat).inverse(schurConfig))
+      runOnce(sc, config.n, config.schurBlockSize)(mat => mat.inverse(schurConfig))
     val schurRmse = computeRmse(schurMat, schurInv, config.schurMidSplits)
     println(f"  time=${schurSec}%.2fs  RMSE=$schurRmse%.3e")
     schurMat.blocks.unpersist(true)
@@ -126,11 +126,11 @@ object Main {
       maxIter = iterMaxIter,
       tolerance = iterTol,
       useCheckpoints = true,
-      checkpointInterval = 5,
-      numMidDimSplits = config.nsMidSplits
+      checkpointEvery = 5,
+      midSplits = config.nsMidSplits
     )
     val (hp3Sec, hp3Mat, hp3Inv) =
-      runOnce(sc, config.n, config.nsBlockSize)(mat => MatrixInversion.block(mat).iterativeInverse(3, hp3Config))
+      runOnce(sc, config.n, config.nsBlockSize)(mat => mat.iterativeInverse(hp3Config.copy(order = 3)))
     val hp3Rmse = computeRmse(hp3Mat, hp3Inv, config.nsMidSplits)
     println(f"  time=${hp3Sec}%.2fs  RMSE=$hp3Rmse%.3e")
     hp3Mat.blocks.unpersist(true)
@@ -141,11 +141,11 @@ object Main {
       maxIter = iterMaxIter,
       tolerance = iterTol,
       useCheckpoints = true,
-      checkpointInterval = 5,
-      numMidDimSplits = config.nsMidSplits
+      checkpointEvery = 5,
+      midSplits = config.nsMidSplits
     )
     val (hp4Sec, hp4Mat, hp4Inv) =
-      runOnce(sc, config.n, config.nsBlockSize)(mat => MatrixInversion.block(mat).iterativeInverse(4, hp4Config))
+      runOnce(sc, config.n, config.nsBlockSize)(mat => mat.iterativeInverse(hp4Config.copy(order = 4)))
     val hp4Rmse = computeRmse(hp4Mat, hp4Inv, config.nsMidSplits)
     println(f"  time=${hp4Sec}%.2fs  RMSE=$hp4Rmse%.3e")
     hp4Mat.blocks.unpersist(true)
@@ -156,11 +156,11 @@ object Main {
       maxIter = iterMaxIter,
       tolerance = iterTol,
       useCheckpoints = true,
-      checkpointInterval = 5,
-      numMidDimSplits = config.nsMidSplits
+      checkpointEvery = 5,
+      midSplits = config.nsMidSplits
     )
     val (iterSec, iterMat, iterInv) =
-      runOnce(sc, config.n, config.nsBlockSize)(mat => MatrixInversion.block(mat).iterativeInverse(2, iterConfig))
+      runOnce(sc, config.n, config.nsBlockSize)(mat => mat.iterativeInverse(iterConfig.copy(order = 2)))
     val iterRmse = computeRmse(iterMat, iterInv, config.nsMidSplits)
     println(f"  time=${iterSec}%.2fs  RMSE=$iterRmse%.3e")
     iterMat.blocks.unpersist(true)

@@ -48,3 +48,6 @@ spark-events/
 
 ### Ivy cache ###
 .ivy2/
+
+### AI coding agent artifacts ###
+.codex/
