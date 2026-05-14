@@ -793,4 +793,187 @@ class TestInverse extends AnyFunSuite {
       assert(correct, s"$name alpha strategy failed")
     }
   }
+
+  // ── Larger matrix benchmarks ─────────────────────────────────────────────
+
+  /** Large diagonally dominant matrix: diag=10, off-diag=random(0,0.5).
+    * Well-conditioned: κ ≈ 10-30 depending on random seed.
+    */
+  private def largeDenseDiagonalMatrix(n: Int, blockSize: Int): BlockMatrix = {
+    val rng = new scala.util.Random(42)
+    val numBlockRows = (n + blockSize - 1) / blockSize
+    val numBlockCols = numBlockRows
+    val blocks = (for {
+      bi <- 0 until numBlockRows
+      bj <- 0 until numBlockCols
+    } yield {
+      val startRow = bi * blockSize
+      val startCol = bj * blockSize
+      val rows = math.min(blockSize, n - startRow)
+      val cols = math.min(blockSize, n - startCol)
+      val data = new Array[Double](rows * cols)
+      var idx = 0
+      for (r <- 0 until rows; c <- 0 until cols) {
+        val globalRow = startRow + r
+        val globalCol = startCol + c
+        data(idx) = if (globalRow == globalCol) 10.0 + rng.nextDouble() * 5.0
+                     else 0.3 * rng.nextDouble()
+        idx += 1
+      }
+      ((bi, bj), new DenseMatrix(rows, cols, data))
+    }).toSeq
+    val mat = new BlockMatrix(sc.parallelize(blocks, 4), blockSize, blockSize)
+    mat.blocks.persist(org.apache.spark.storage.StorageLevel.MEMORY_AND_DISK_SER)
+    mat.blocks.count()  // Force materialization before timing
+    mat
+  }
+
+  /** Moderately ill-conditioned matrix: small diagonal + larger off-diagonal.
+    * Condition number κ ≈ 50-200, making alpha choice matter.
+    */
+  private def moderateConditionMatrix(n: Int, blockSize: Int): BlockMatrix = {
+    val rng = new scala.util.Random(123)
+    val numBlockRows = (n + blockSize - 1) / blockSize
+    val numBlockCols = numBlockRows
+    val blocks = (for {
+      bi <- 0 until numBlockRows
+      bj <- 0 until numBlockCols
+    } yield {
+      val startRow = bi * blockSize
+      val startCol = bj * blockSize
+      val rows = math.min(blockSize, n - startRow)
+      val cols = math.min(blockSize, n - startCol)
+      val data = new Array[Double](rows * cols)
+      var idx = 0
+      for (r <- 0 until rows; c <- 0 until cols) {
+        val globalRow = startRow + r
+        val globalCol = startCol + c
+        // diag = 2-5, off-diag = 0.5-1.5 → κ ≈ 20-100
+        data(idx) = if (globalRow == globalCol) 2.0 + rng.nextDouble() * 3.0
+                     else 0.5 + rng.nextDouble() * 1.0
+        idx += 1
+      }
+      ((bi, bj), new DenseMatrix(rows, cols, data))
+    }).toSeq
+    val mat = new BlockMatrix(sc.parallelize(blocks, 4), blockSize, blockSize)
+    mat.blocks.persist(org.apache.spark.storage.StorageLevel.MEMORY_AND_DISK_SER)
+    mat.blocks.count()
+    mat
+  }
+
+  test("alpha benchmark: n=100 well-conditioned order=2") {
+    val n = 100
+    val blockSize = 25
+    val mat = largeDenseDiagonalMatrix(n, blockSize)
+    try {
+      val configs = Seq(
+        ("NormProduct", IterativeInverseConfig(order = 2, maxIter = 100, tolerance = 1e-12, useCheckpoints = false, midSplits = 2, alphaStrategy = AlphaStrategy.NormProduct)),
+        ("Frobenius",  IterativeInverseConfig(order = 2, maxIter = 100, tolerance = 1e-12, useCheckpoints = false, midSplits = 2, alphaStrategy = AlphaStrategy.Frobenius)),
+        ("PowerIter3", IterativeInverseConfig(order = 2, maxIter = 100, tolerance = 1e-12, useCheckpoints = false, midSplits = 2, alphaStrategy = AlphaStrategy.PowerIteration(3))),
+        ("Adaptive",   IterativeInverseConfig(order = 2, maxIter = 100, tolerance = 1e-12, useCheckpoints = false, midSplits = 2, alphaStrategy = AlphaStrategy.Adaptive))
+      )
+      println(s"\n  Alpha benchmark: n=$n well-conditioned (diag≈10-15, off-diag≈0.15), order=2")
+      for ((name, config) <- configs) {
+        val t0 = System.nanoTime()
+        val inv = mat.iterativeInverse(config)
+        inv.blocks.count()
+        val elapsed = (System.nanoTime() - t0) / 1e6
+        val product = mat.multiply(inv, 2)
+        val rmse = math.sqrt(new BlockMatrixOps(product).frobeniusNormSquared()) / n
+        product.blocks.unpersist(true)
+        inv.blocks.unpersist(true)
+        println(f"    $name%12s: ${elapsed}%6.0f ms, RMSE=$rmse%.6e")
+        assert(rmse < 0.15, s"$name: RMSE $rmse too large")
+      }
+    } finally {
+      mat.blocks.unpersist(true)
+    }
+  }
+
+  test("alpha benchmark: n=100 well-conditioned order=3") {
+    val n = 100
+    val blockSize = 25
+    val mat = largeDenseDiagonalMatrix(n, blockSize)
+    try {
+      val configs = Seq(
+        ("NormProduct", IterativeInverseConfig(order = 3, maxIter = 50, tolerance = 1e-12, useCheckpoints = false, midSplits = 2, alphaStrategy = AlphaStrategy.NormProduct)),
+        ("Frobenius",  IterativeInverseConfig(order = 3, maxIter = 50, tolerance = 1e-12, useCheckpoints = false, midSplits = 2, alphaStrategy = AlphaStrategy.Frobenius)),
+        ("PowerIter3", IterativeInverseConfig(order = 3, maxIter = 50, tolerance = 1e-12, useCheckpoints = false, midSplits = 2, alphaStrategy = AlphaStrategy.PowerIteration(3))),
+        ("Adaptive",   IterativeInverseConfig(order = 3, maxIter = 50, tolerance = 1e-12, useCheckpoints = false, midSplits = 2, alphaStrategy = AlphaStrategy.Adaptive))
+      )
+      println(s"\n  Alpha benchmark: n=$n well-conditioned (diag≈10-15, off-diag≈0.15), order=3")
+      for ((name, config) <- configs) {
+        val t0 = System.nanoTime()
+        val inv = mat.iterativeInverse(config)
+        inv.blocks.count()
+        val elapsed = (System.nanoTime() - t0) / 1e6
+        val product = mat.multiply(inv, 2)
+        val rmse = math.sqrt(new BlockMatrixOps(product).frobeniusNormSquared()) / n
+        product.blocks.unpersist(true)
+        inv.blocks.unpersist(true)
+        println(f"    $name%12s: ${elapsed}%6.0f ms, RMSE=$rmse%.6e")
+        assert(rmse < 0.15, s"$name: RMSE $rmse too large")
+      }
+    } finally {
+      mat.blocks.unpersist(true)
+    }
+  }
+
+  test("alpha benchmark: n=500 well-conditioned order=2") {
+    val n = 500
+    val blockSize = 50
+    val mat = largeDenseDiagonalMatrix(n, blockSize)
+    try {
+      val configs = Seq(
+        ("NormProduct", IterativeInverseConfig(order = 2, maxIter = 100, tolerance = 1e-12, useCheckpoints = true, midSplits = 4, alphaStrategy = AlphaStrategy.NormProduct)),
+        ("Frobenius",  IterativeInverseConfig(order = 2, maxIter = 100, tolerance = 1e-12, useCheckpoints = true, midSplits = 4, alphaStrategy = AlphaStrategy.Frobenius)),
+        ("PowerIter3", IterativeInverseConfig(order = 2, maxIter = 100, tolerance = 1e-12, useCheckpoints = true, midSplits = 4, alphaStrategy = AlphaStrategy.PowerIteration(3))),
+        ("Adaptive",   IterativeInverseConfig(order = 2, maxIter = 100, tolerance = 1e-12, useCheckpoints = true, midSplits = 4, alphaStrategy = AlphaStrategy.Adaptive))
+      )
+      println(s"\n  Alpha benchmark: n=$n well-conditioned (diag≈10-15, off-diag≈0.15), order=2")
+      for ((name, config) <- configs) {
+        val t0 = System.nanoTime()
+        val inv = mat.iterativeInverse(config)
+        inv.blocks.count()
+        val elapsed = (System.nanoTime() - t0) / 1e6
+        val product = mat.multiply(inv, 4)
+        val rmse = math.sqrt(new BlockMatrixOps(product).frobeniusNormSquared()) / n
+        product.blocks.unpersist(true)
+        inv.blocks.unpersist(true)
+        println(f"    $name%12s: ${elapsed}%6.0f ms, RMSE=$rmse%.6e")
+        assert(rmse < 0.15, s"$name: RMSE $rmse too large")
+      }
+    } finally {
+      mat.blocks.unpersist(true)
+    }
+  }
+
+  test("alpha benchmark: n=100 moderate-conditioned order=2") {
+    val n = 100
+    val blockSize = 25
+    val mat = moderateConditionMatrix(n, blockSize)
+    try {
+      val configs = Seq(
+        ("NormProduct", IterativeInverseConfig(order = 2, maxIter = 200, tolerance = 1e-10, useCheckpoints = false, midSplits = 2, alphaStrategy = AlphaStrategy.NormProduct)),
+        ("Frobenius",  IterativeInverseConfig(order = 2, maxIter = 200, tolerance = 1e-10, useCheckpoints = false, midSplits = 2, alphaStrategy = AlphaStrategy.Frobenius)),
+        ("PowerIter3", IterativeInverseConfig(order = 2, maxIter = 200, tolerance = 1e-10, useCheckpoints = false, midSplits = 2, alphaStrategy = AlphaStrategy.PowerIteration(3)))
+      )
+      println(s"\n  Alpha benchmark: n=$n moderate-conditioned (diag≈2-5, off-diag≈0.5-1.5), order=2")
+      for ((name, config) <- configs) {
+        val t0 = System.nanoTime()
+        val inv = mat.iterativeInverse(config)
+        inv.blocks.count()
+        val elapsed = (System.nanoTime() - t0) / 1e6
+        val product = mat.multiply(inv, 2)
+        val rmse = math.sqrt(new BlockMatrixOps(product).frobeniusNormSquared()) / n
+        product.blocks.unpersist(true)
+        inv.blocks.unpersist(true)
+        println(f"    $name%12s: ${elapsed}%6.0f ms, RMSE=$rmse%.6e")
+        // More lenient tolerance for moderate conditioning
+        assert(rmse < 0.1, s"$name: RMSE $rmse too large")
+      }
+    } finally {
+      mat.blocks.unpersist(true)
+    }
+  }
 }
