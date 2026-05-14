@@ -771,4 +771,26 @@ class TestInverse extends AnyFunSuite {
     val inverse = matrix.iterativeInverse(config)
     assert(testMatrixSimilarity(inverse.toLocalMatrix(), expected, 1e-8))
   }
+
+  test("alpha strategy timing comparison") {
+    val matrix = diagonallyDominantBlockMatrix()
+    val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
+    
+    val configs = Seq(
+      ("NormProduct", IterativeInverseConfig(order = 2, maxIter = 30, tolerance = 1e-10, useCheckpoints = false, midSplits = 1, alphaStrategy = AlphaStrategy.NormProduct)),
+      ("Frobenius",  IterativeInverseConfig(order = 2, maxIter = 30, tolerance = 1e-10, useCheckpoints = false, midSplits = 1, alphaStrategy = AlphaStrategy.Frobenius)),
+      ("PowerIter2", IterativeInverseConfig(order = 2, maxIter = 30, tolerance = 1e-10, useCheckpoints = false, midSplits = 1, alphaStrategy = AlphaStrategy.PowerIteration(2))),
+      ("Adaptive",   IterativeInverseConfig(order = 2, maxIter = 30, tolerance = 1e-10, useCheckpoints = false, midSplits = 1, alphaStrategy = AlphaStrategy.Adaptive))
+    )
+    
+    for ((name, config) <- configs) {
+      val t0 = System.nanoTime()
+      val inverse = matrix.iterativeInverse(config)
+      inverse.blocks.count()
+      val elapsed = (System.nanoTime() - t0) / 1e6
+      val correct = testMatrixSimilarity(inverse.toLocalMatrix(), expected, 1e-8)
+      println(f"    $name%12s: ${elapsed}%6.0f ms, correct=$correct")
+      assert(correct, s"$name alpha strategy failed")
+    }
+  }
 }
