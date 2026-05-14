@@ -1162,3 +1162,119 @@ if (!converged) {
     algorithmName, config.maxIter, finalMetric)
 }
 ```
+
+---
+
+## 14. Example job: EASE Recommender
+
+**Priority:** 🟡 Nice-to-have  
+**Effort:** Medium  
+**Files:** New — `examples/` or `bench/`  
+**Tag:** **[both]** — correctness of EASE weights: local. End-to-end training time: cluster
+
+### Problem
+
+The library has no example usage that demonstrates real-world value. An EASE (Embarrassingly Shallow Autoencoder) model is the ideal showcase because:
+
+1. **It's essentially a distributed matrix inversion** — the closed-form EASE weights solve `B = (XᵀX + λI)⁻¹` for the Gram matrix inverse, exactly what `sparkInverse` does
+2. **It's a real recommendation algorithm** used in production at companies like Spotify and Zalando
+3. **It operates on sparse user–item interaction matrices** that are exactly the size (10⁵–10⁷ users × items) where distributed inversion matters
+
+### EASE Model
+
+The EASE algorithm (Steck, 2019) computes item-to-item recommendation weights:
+
+1. Compute the Gram matrix: `G = XᵀX` where `X` is the user–item interaction matrix
+2. Regularize and invert: `B = (G + λI)⁻¹`
+3. Zero-out diagonal: `B ← B - diag(B) · I`
+4. Normalize: `B ← B / -diag(B)ᵀ` (element-wise division by negative diagonal)
+5. Predictions: `Ŷ = XB` for scoring unseen items
+
+### Proposed Example
+
+A self-contained Spark job in `bench/src/main/scala/sparkinverse/benchmark/EaseJob.scala`:
+
+```scala
+// Read interaction matrix X (users × items) as CoordinateMatrix
+val X = spark.read.parquet("hdfs://...").as[Interaction].toCoordinateMatrix()
+
+// Step 1: Gram matrix
+val G = X.transpose().multiply(X, midSplits = 4)
+
+// Step 2: Regularize and invert using sparkInverse
+val lambda = 500.0
+val regularized = G.add(MatrixInternals.eyeBlockMatrix(..., lambda, ...))
+val B = regularized.inverse(IterativeInverseConfig(
+  order = 2, maxIter = 50, tolerance = 1e-8,
+  alphaStrategy = AlphaStrategy.Frobenius
+))
+
+// Step 3-4: Zero diagonal and normalize (local operations on blocks)
+val B_normalized = EaseModel.normalizeWeights(B)
+
+// Step 5: Score for all user–item pairs
+val predictions = X.multiply(B_normalized, midSplits = 4)
+```
+
+### What this validates
+
+| Aspect                 | How the example tests it                                                            |
+| ---------------------- | ----------------------------------------------------------------------------------- |
+| Correctness of inverse | Compare EASE recall@K against a known-good NumPy/SciPy baseline on a small dataset  |
+| AlphaStrategy choice   | Show convergence difference on the (G + λI) matrix which has κ ≈ λ/σ_min            |
+| Performance at scale   | Run on MovieLens 10M+ or a synthetic 1M×100K matrix on a K8s cluster                |
+| Partition behavior     | The Gram matrix of a 1M×100K sparse matrix is 100K×100K dense — perfect stress test |
+| Checkpoint + unpersist | Long-running job (many iterations) exposes the correctness bug in TODO #1           |
+
+### Dataset suggestions
+
+- **MovieLens 25M** — well-known, ~160K users × ~60K items
+- **Synthetic** — generate a sparse user–item matrix with configurable κ to test alpha strategies on ill-conditioned Gram matrices
+
+---
+
+## Benchmarking Mandate
+
+Every improvement implemented from this TODO list **must** be followed by:
+
+### 1. Benchmark comparison
+
+- **Before:** run the existing benchmark on the pre-change commit
+- **After:** run the same benchmark on the post-change commit
+- **Measure:** both wall-clock time **and** iteration count (the latter is logged at `logger.info` level in the iterative inverse loop)
+- **Report:** the delta (e.g. "−12%", "+3 iterations", "no measurable difference")
+- **No commit without numbers.** If the change does not improve anything, document that and keep it anyway if there's a correctness reason — but the numbers must exist.
+
+### 2. Assess whether results are locally meaningful
+
+| Matrix size       | What you **can** measure locally (`local[*]`)                   | What you **need** a cluster for                                                         |
+| ----------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| **n ≤ 500**       | Correctness, basic algorithm behavior, RMSE                     | Nothing — too small for network I/O to matter                                           |
+| **n ≈ 1000–5000** | Whether iteration count changes, whether the fix works          | Shuffle cost, I/O patterns, partition behavior                                          |
+| **n ≥ 10 000**    | Nothing meaningful — local Spark is a loopback, no real shuffle | Actual performance differences, shuffle vs no-shuffle, partition explosion, network I/O |
+
+### 3. Tag each improvement accordingly
+
+Add a one-line tag to the TODO item:
+
+- **`[local]`** — the improvement can be verified on `local[*]` (correctness fixes, algorithm changes that affect iteration count)
+- **`[cluster]`** — the improvement is only visible on a real distributed cluster (shuffle optimizations, partition tuning, I/O reductions)
+- **`[both]`** — correctness can be verified locally, performance needs a cluster
+
+### Current tag assignments
+
+| #   | Item                               | Tag           | Notes                                        |
+| --- | ---------------------------------- | ------------- | -------------------------------------------- |
+| 1   | Unpersist-before-evaluation bug    | **[both]**    | Correctness: local. Perf regression: cluster |
+| 2   | Alpha scaling strategies           | **[both]**    | Convergence: local. Shuffle cost: cluster    |
+| 3   | Single-pass quadrant split         | **[both]**    | Correctness: local. I/O reduction: cluster   |
+| 4   | LU-based local inversion           | **[local]**   | Pure computation speedup                     |
+| 5   | CoordinateMatrix repeated squaring | **[cluster]** | Shuffles only matter at scale                |
+| 6   | Adaptive iteration order           | **[local]**   | Iteration count measurable locally           |
+| 7   | Checkpoint tuning                  | **[both]**    | Correctness: local. I/O: cluster             |
+| 8   | Pseudo-inverse SVD path            | **[local]**   | Algorithm change visible locally             |
+| 9   | Partition count explosion          | **[cluster]** | Only visible with many workers               |
+| 10  | Adaptive checkpointing             | **[cluster]** | I/O patterns need real storage               |
+| 11  | Tolerance-based early exit         | **[local]**   | Iteration count measurable locally           |
+| 12  | Pseudo-inverse regularization      | **[local]**   | Correctness + convergence visible locally    |
+| 13  | Dead code `previousMetric`         | **[local]**   | Code cleanup only                            |
