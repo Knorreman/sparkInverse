@@ -67,6 +67,29 @@ class TestInverse extends AnyFunSuite {
     assert(testMatrixSimilarity(inverse.toBlockMatrix().toLocalMatrix(), expected, 1e-12))
   }
 
+  test("coordinate adaptive block size heuristic") {
+    assert(CoordinateMatrixOps.adaptiveBlockSize(minDim = 2000, density = 0.00001) == 32)
+    assert(CoordinateMatrixOps.adaptiveBlockSize(minDim = 2000, density = 0.0005) == 64)
+    assert(CoordinateMatrixOps.adaptiveBlockSize(minDim = 2000, density = 0.005) == 128)
+    assert(CoordinateMatrixOps.adaptiveBlockSize(minDim = 2000, density = 0.03) == 256)
+    assert(CoordinateMatrixOps.adaptiveBlockSize(minDim = 2000, density = 0.1) == 512)
+    assert(CoordinateMatrixOps.adaptiveBlockSize(minDim = 2000, density = 0.5) == 1024)
+    assert(CoordinateMatrixOps.adaptiveBlockSize(minDim = 48, density = 0.00001) == 32)
+    assert(CoordinateMatrixOps.adaptiveBlockSize(minDim = 20, density = 0.5) == 20)
+  }
+
+  test("coordinate sparse matrix selects smaller block size") {
+    val entries = sc.parallelize(Seq(
+      MatrixEntry(0, 0, 5.0),
+      MatrixEntry(1, 1, 4.0),
+      MatrixEntry(2, 2, 3.0),
+      MatrixEntry(3, 3, 2.0)
+    ), numPartitions)
+    val sparse = new CoordinateMatrix(entries, 2048, 2048)
+    val ops = new CoordinateMatrixOps(sparse)
+    assert(ops.selectedBlockSizeForTesting <= 64)
+  }
+
   test("block recursive inverse handles single-block matrices") {
     val matrix = singleBlockMatrix()
     val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
