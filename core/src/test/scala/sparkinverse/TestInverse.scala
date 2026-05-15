@@ -98,6 +98,54 @@ class TestInverse extends AnyFunSuite {
     assert(testMatrixSimilarity(luInv, expected.toLocalMatrix(), 1e-12))
   }
 
+  test("localInverse falls back to SVD on near-singular matrix") {
+    // Construct a singular matrix by making two rows identical.
+    // LU should detect singularity; localInverse should recover via SVD.
+    val n = 4
+    val blockSize = 2
+    // Matrix:
+    // [1 0 0 0]  Row 0
+    // [0 1 0 0]  Row 1
+    // [1 0 0 0]  Row 2 = Row 0 (duplicate → singular)
+    // [0 0 1 0]  Row 3
+    val blocks = Seq(
+      ((0, 0), new DenseMatrix(2, 2, Array(1.0, 0.0, 0.0, 1.0))),
+      ((0, 1), new DenseMatrix(2, 2, Array(0.0, 0.0, 0.0, 0.0))),
+      ((1, 0), new DenseMatrix(2, 2, Array(1.0, 0.0, 0.0, 0.0))), // Row 2 = Row 0
+      ((1, 1), new DenseMatrix(2, 2, Array(0.0, 0.0, 1.0, 0.0)))
+    )
+    val singular = new BlockMatrix(sc.parallelize(blocks, 2), blockSize, blockSize)
+
+    // luInverse should throw on singular matrix
+    assertThrows[IllegalArgumentException] {
+      singular.luInverse()
+    }
+
+    // localInverse should not throw (SVD fallback succeeds)
+    val localInv = singular.localInverse()
+
+    // Result should have correct dimensions
+    assert(localInv.numRows() == n)
+    assert(localInv.numCols() == n)
+  }
+
+  test("multi-block recursion exercises localInverse at leaves") {
+    // A 4×4 matrix with blockSize=2 gives a 2×2 block grid.
+    // With limit=1, each leaf is a single block → triggers localInverse().
+    val n = 4
+    val blockSize = 2
+    val blocks = (for (i <- 0 until 2; j <- 0 until 2) yield {
+      val blockData = if (i == j) Array(2.0, -1.0, -1.0, 2.0) else Array(0.0, 0.0, 0.0, 0.0)
+      ((i, j), new DenseMatrix(blockSize, blockSize, blockData))
+    }).toSeq
+    val matrix = new BlockMatrix(sc.parallelize(blocks, numPartitions), blockSize, blockSize)
+    val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
+
+    val config = RecursiveInverseConfig(limit = 1, midSplits = 1, useCheckpoints = false)
+    val inverse = matrix.inverse(config)
+    assert(testMatrixSimilarity(inverse.toLocalMatrix(), expected, 1e-10))
+  }
+
   test("coordinate local inverse and syntax methods") {
     val matrix = sampleBlockMatrix().toCoordinateMatrix()
     val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
