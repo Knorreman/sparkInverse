@@ -69,6 +69,27 @@ Each item includes: description, code location, root cause, proposed fix, effort
 
 ---
 
+### 7. Convergence Check Frequency — COMPLETED
+
+**Priority:** 🟡 Medium  
+**Effort:** Low  
+**Files:** `core/src/main/scala/sparkinverse/api/Configs.scala`, `core/src/main/scala/sparkinverse/block/BlockMatrixOps.scala`, `core/src/test/scala/sparkinverse/TestInverse.scala`, `README.md`
+
+**Implementation:**
+
+- Added `IterativeInverseConfig.convergenceCheckInterval` with default `1` for backward-compatible per-iteration checks
+- Validates interval is positive
+- Iterative inverse now computes the expensive Frobenius convergence metric only on iteration 1 and every N iterations
+- Adaptive alpha still performs its first-iteration metric/refinement path
+- Non-convergence warning now reports the last checked metric
+
+**Validation:**
+
+- Added tests for sparse convergence checks, higher-order hyperpower, adaptive alpha, invalid interval, and default compatibility
+- All 54 core tests pass
+
+---
+
 ## 1. Unpersist Before Lazy Evaluation (Correctness Bug) — COMPLETED
 
 **Priority:** 🔴 Critical  
@@ -578,7 +599,7 @@ This would require modifying `buildHyperpowerCorrection` to accept custom polyno
 
 ---
 
-## 7. Convergence Check Frequency
+## 7. Convergence Check Frequency — COMPLETED
 
 **Priority:** 🟡 Medium  
 **Effort:** Low  

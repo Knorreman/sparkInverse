@@ -709,10 +709,13 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
       s"Matrix must be square for inversion. Found ${matrix.numRows()} rows and ${matrix.numCols()} columns.")
     require(config.maxIter > 0, s"Maximum iterations must be positive. Got maxIter=${config.maxIter}.")
     require(config.tolerance > 0, s"Tolerance must be positive. Got tolerance=${config.tolerance}.")
+    require(config.convergenceCheckInterval > 0,
+      s"Convergence check interval must be positive. Got convergenceCheckInterval=${config.convergenceCheckInterval}.")
 
     val storageLevel = config.persistLevel
     val checkpointEvery = math.max(1, config.checkpointEvery)
     val midSplits = math.max(1, config.midSplits)
+    val convergenceCheckInterval = config.convergenceCheckInterval
     val shouldPersistInput = matrix.blocks.getStorageLevel == StorageLevel.NONE
     if (shouldPersistInput) {
       matrix.blocks.persist(storageLevel)
@@ -741,12 +744,22 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
 
       val residual = eye.subtract(ax)
       residual.blocks.persist(storageLevel)
-      val metric = math.sqrt(new BlockMatrixOps(residual).frobeniusNormSquared()) / n
-      logger.debug("{} iter={}: ||I - A*X||_F / n = {}", algorithmName, iter, metric)
+      val shouldCheckConvergence = iter == 1 || iter % convergenceCheckInterval == 0
+      val metricOpt = if (shouldCheckConvergence) {
+        val metric = math.sqrt(new BlockMatrixOps(residual).frobeniusNormSquared()) / n
+        logger.debug("{} iter={}: ||I - A*X||_F / n = {}", algorithmName, iter, metric)
+        Some(metric)
+      } else {
+        logger.debug("{} iter={}: skipping convergence check (last checked metric={})",
+          algorithmName, iter, lastMetric)
+        None
+      }
 
       // Adaptive alpha refinement: after first iteration, use the residual
       // to improve our estimate of σ₁² and thus α.
       if (iter == 1 && config.alphaStrategy == AlphaStrategy.Adaptive) {
+        val metric = metricOpt.getOrElse(
+          throw new IllegalStateException("Adaptive alpha requires a first-iteration convergence metric."))
         val refinedAlpha = refineAlphaAdaptive(currentAlpha, residual, n, iter)
         if (refinedAlpha != currentAlpha) {
           // Restart with refined alpha
@@ -822,9 +835,11 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
         }
       } else {
         // Normal iteration (not first-iteration adaptive refinement)
-        lastMetric = metric
-        if (metric < config.tolerance) {
-          converged = true
+        metricOpt.foreach { metric =>
+          lastMetric = metric
+          if (metric < config.tolerance) {
+            converged = true
+          }
         }
 
         if (!converged) {
@@ -848,7 +863,7 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     }
 
     if (!converged) {
-      logger.warn("{} did not converge after {} iterations. Last metric: {}",
+      logger.warn("{} did not converge after {} iterations. Last checked metric: {}",
         algorithmName, config.maxIter, lastMetric)
     }
 
