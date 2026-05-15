@@ -726,8 +726,11 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
 
     val n = matrix.numRows()
     val alpha = computeInitialAlpha(config)
+    val maxOrder = order
+    var currentOrder = order
 
-    logger.info("{}: n={}, alpha={}, order={}", algorithmName, n, alpha, order)
+    logger.info("{}: n={}, alpha={}, maxOrder={}{}", algorithmName, n, alpha, maxOrder,
+      if (config.adaptiveOrder) ", adaptive=true" else "")
 
     var currentAlpha = alpha
     var x = new BlockMatrixOps(matrix.transpose).scalarMultiply(currentAlpha)
@@ -797,7 +800,7 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
 
           if (!converged) {
             val (correction, extraPowers) = buildHyperpowerCorrection(
-              eye, residualNew, order, midSplits, storageLevel)
+              eye, residualNew, currentOrder, midSplits, storageLevel)
             val xNew = x.multiply(correction, midSplits)
             val oldX = x
             x = xNew
@@ -825,7 +828,7 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
 
           if (!converged) {
             val (correction, extraPowers) = buildHyperpowerCorrection(
-              eye, residual, order, midSplits, storageLevel)
+              eye, residual, currentOrder, midSplits, storageLevel)
             val xNew = x.multiply(correction, midSplits)
             val oldX = x
             x = xNew
@@ -844,6 +847,15 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
       } else {
         // Normal iteration (not first-iteration adaptive refinement)
         metricOpt.foreach { metric =>
+          // Adaptive order: reduce hyperpower order as residual shrinks.
+          // Use ||R||_F / sqrt(n) as a proxy for spectral radius rho(R).
+          // The crossover where order 2 becomes more efficient than order 3
+          // per matrix multiply is at rho ~ 0.67. Using sqrt(n) normalization
+          // makes the threshold more dimension-independent.
+          if (config.adaptiveOrder) {
+            val scaledMetric = metric * math.sqrt(n.toDouble)
+            currentOrder = if (scaledMetric > config.adaptiveOrderFallback) maxOrder else 2
+          }
           // Divergence detection: if residual norm is growing significantly,
           // the iteration may be diverging due to poor initial scaling.
           // Guard with lastMetric > tolerance to avoid false positives near convergence.
@@ -860,7 +872,7 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
 
         if (!converged) {
           val (correction, extraPowers) = buildHyperpowerCorrection(
-            eye, residual, order, midSplits, storageLevel)
+            eye, residual, currentOrder, midSplits, storageLevel)
           val xNew = x.multiply(correction, midSplits)
           val oldX = x
           x = xNew

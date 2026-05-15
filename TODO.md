@@ -588,11 +588,28 @@ The `count()` is cheap if A is small relative to the iterative computations, and
 
 ---
 
-## 6. Adaptive Iteration Order
+## 6. Adaptive Iteration Order — COMPLETED
 
 **Priority:** 🟡 Medium  
 **Effort:** Medium  
-**Files:** `core/src/main/scala/sparkinverse/block/BlockMatrixOps.scala`, `core/src/main/scala/sparkinverse/api/Configs.scala`
+**Files:** `core/src/main/scala/sparkinverse/api/Configs.scala`, `core/src/main/scala/sparkinverse/block/BlockMatrixOps.scala`, `core/src/test/scala/sparkinverse/TestInverse.scala`, `README.md`
+
+**Implementation:**
+
+- Added `adaptiveOrder: Boolean = false` and `adaptiveOrderFallback: Double = 0.3` to `IterativeInverseConfig`
+- When enabled, uses `‖R‖_F / √n` as dimension-independent proxy for spectral radius
+- Starts at configured `order` when residual is large, drops to order 2 when proxy < threshold
+- Backward compatible: `adaptiveOrder = false` (default) preserves fixed-order behavior
+- Validated with tests for convergence, equivalence with order 2, and sparse convergence checks
+
+**Validation:**
+
+- All 61 core tests pass
+- bench/compile passes
+
+---
+
+## 1. Unpersist Before Lazy Evaluation (Correctness Bug) — COMPLETED
 
 ### Problem
 

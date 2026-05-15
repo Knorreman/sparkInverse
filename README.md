@@ -152,6 +152,8 @@ Additional distributed arithmetic helpers for `CoordinateMatrix`:
 | `persistLevel`             | `StorageLevel`  | `MEMORY_AND_DISK_SER` | Storage level for intermediates           |
 | `alphaStrategy`            | `AlphaStrategy` | `Frobenius`           | Initial scaling α computation             |
 | `convergenceCheckInterval` | `Int`           | `1`                   | Check `‖I - AX‖_F / n` every N iterations |
+| `adaptiveOrder`           | `Boolean`       | `false`               | Reduce hyperpower order as residual shrinks |
+| `adaptiveOrderFallback`  | `Double`        | `0.3`                  | Switch to order 2 when `‖R‖_F/√n` below threshold |
 
 ## Choosing An Algorithm
 

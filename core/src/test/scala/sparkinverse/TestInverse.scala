@@ -423,6 +423,64 @@ class TestInverse extends AnyFunSuite {
     assert(testMatrixSimilarity(inverse2.toLocalMatrix(), expected, 1e-10))
   }
 
+  test("adaptive order converges from high order to order 2") {
+    val matrix = diagonallyDominantBlockMatrix()
+    val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
+
+    // Adaptive order: starts at order 5, falls back to order 2 when residual is small
+    val config = IterativeInverseConfig(
+      order = 5,
+      maxIter = 30,
+      tolerance = 1e-10,
+      useCheckpoints = false,
+      midSplits = 1,
+      convergenceCheckInterval = 1,
+      adaptiveOrder = true,
+      adaptiveOrderFallback = 0.3
+    )
+    val inverse = matrix.iterativeInverse(config)
+    assert(testMatrixSimilarity(inverse.toLocalMatrix(), expected, 1e-8))
+  }
+
+  test("adaptive order with order 2 is equivalent to fixed order 2") {
+    val matrix = diagonallyDominantBlockMatrix()
+    val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
+
+    // When maxOrder is already 2, adaptive order should behave identically to fixed order 2
+    val configFixed = IterativeInverseConfig(
+      order = 2, maxIter = 20, tolerance = 1e-10,
+      useCheckpoints = false, midSplits = 1
+    )
+    val configAdaptive = IterativeInverseConfig(
+      order = 2, maxIter = 20, tolerance = 1e-10,
+      useCheckpoints = false, midSplits = 1,
+      adaptiveOrder = true
+    )
+
+    val fixed = matrix.iterativeInverse(configFixed)
+    val adaptive = matrix.iterativeInverse(configAdaptive)
+    assert(testMatrixSimilarity(fixed.toLocalMatrix(), expected, 1e-8))
+    assert(testMatrixSimilarity(adaptive.toLocalMatrix(), expected, 1e-8))
+  }
+
+  test("adaptive order with sparse convergence checks") {
+    val matrix = diagonallyDominantBlockMatrix()
+    val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
+
+    val config = IterativeInverseConfig(
+      order = 4,
+      maxIter = 30,
+      tolerance = 1e-10,
+      useCheckpoints = false,
+      midSplits = 1,
+      convergenceCheckInterval = 2,
+      adaptiveOrder = true,
+      adaptiveOrderFallback = 0.3
+    )
+    val inverse = matrix.iterativeInverse(config)
+    assert(testMatrixSimilarity(inverse.toLocalMatrix(), expected, 1e-8))
+  }
+
   test("iterative convergence check interval greater than one converges") {
     val matrix = diagonallyDominantBlockMatrix()
     val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))

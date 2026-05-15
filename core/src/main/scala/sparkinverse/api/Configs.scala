@@ -88,5 +88,20 @@ final case class IterativeInverseConfig(
   /** Check convergence every N iterations. Default 1 preserves the historical
     * behavior of checking ‖I - A·X‖_F / n on every iteration.
     */
-  convergenceCheckInterval: Int = 1
+  convergenceCheckInterval: Int = 1,
+
+  /** When true, reduce the hyperpower order as the residual shrinks.
+    * Start at the configured order when far from convergence, then drop to
+    * order 2 (Newton-Schulz) once ‖R‖_F / √n falls below `adaptiveOrderFallback`.
+    * The configured `order` becomes the maximum order; set it to 3 or higher
+    * to see the adaptive effect.
+    */
+  adaptiveOrder: Boolean = false,
+
+  /** Metric threshold below which adaptive order falls back to 2.
+    * Only used when `adaptiveOrder` is true. The metric is ‖I - A·X‖_F / √n,
+    * which is a better proxy for the spectral radius ρ(R) than ‖R‖_F / n.
+    * Default 0.3 means: switch to order 2 when ρ(R) is estimated below ~0.3.
+    */
+  adaptiveOrderFallback: Double = 0.3
 )
