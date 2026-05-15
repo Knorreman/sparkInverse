@@ -301,10 +301,23 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     val outputParts = config.targetOutputPartitions.getOrElse(defaultOutputParts)
     val allBlocks = MatrixInternals.maybeCoalesceNoShuffle(unionedBlocks, outputParts, config.unionCoalesceThreshold)
     val bm = new BlockMatrix(allBlocks, rowsPerBlock, colsPerBlock, matrix.numRows(), matrix.numCols())
-    if (config.useCheckpoints) {
+
+    // Spark RDDs are lazy: the returned BlockMatrix still depends on the
+    // tracked intermediates above until an action materializes its blocks.
+    // Persist + materialize the output before unpersisting those parents so
+    // callers do not recompute from dropped caches, and so checkpoint() (when
+    // enabled) is actually written before parent lineage is released.
+    val shouldMaterializeOutput = config.useCheckpoints || cachedMatrices.nonEmpty
+    if (shouldMaterializeOutput) {
       bm.blocks.persist(iterativeStorageLevel)
+    }
+    if (config.useCheckpoints) {
       bm.blocks.checkpoint()
     }
+    if (shouldMaterializeOutput) {
+      bm.blocks.count()
+    }
+
     cachedMatrices.foreach(cached => cached.blocks.unpersist(true))
     bm
   }
