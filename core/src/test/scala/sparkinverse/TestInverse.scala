@@ -483,6 +483,49 @@ class TestInverse extends AnyFunSuite {
     assert(testMatrixSimilarity(product.toLocalMatrix(), breezeToDenseMatrix(identity), 1e-6))
   }
 
+  test("recursive inverse materializes output before unpersist without checkpoints") {
+    import org.apache.spark.storage.StorageLevel
+
+    val n = 8
+    val matrix = recursiveTestBlockMatrix(n, blockSize = 2)
+    val config = RecursiveInverseConfig(
+      limit = 2,
+      midSplits = 2,
+      useCheckpoints = false,
+      minBlockSizeForPersistence = 0
+    )
+
+    val inverse = matrix.inverse(config)
+
+    // Regression for unpersist-before-evaluation: the returned result should be
+    // persisted/materialized before intermediate parents are unpersisted.
+    assert(inverse.blocks.getStorageLevel != StorageLevel.NONE)
+    assert(inverse.blocks.count() > 0)
+
+    val product = matrix.multiply(inverse, 2)
+    assert(testMatrixSimilarity(product.toLocalMatrix(), identityBlockMatrix(n).toLocalMatrix(), 1e-6))
+  }
+
+  test("recursive inverse writes checkpoint before unpersisting intermediates") {
+    val n = 8
+    val matrix = recursiveTestBlockMatrix(n, blockSize = 2)
+    val config = RecursiveInverseConfig(
+      limit = 2,
+      midSplits = 2,
+      useCheckpoints = true,
+      minBlockSizeForPersistence = 0
+    )
+
+    val inverse = matrix.inverse(config)
+
+    // checkpoint() is lazy; this should already be materialized by inverse().
+    assert(inverse.blocks.isCheckpointed)
+    assert(inverse.blocks.count() > 0)
+
+    val product = matrix.multiply(inverse, 2)
+    assert(testMatrixSimilarity(product.toLocalMatrix(), identityBlockMatrix(n).toLocalMatrix(), 1e-6))
+  }
+
   test("coordinate recursive inversion") {
     val matrix = diagonallyDominantCoordinateMatrix()
     val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
@@ -507,6 +550,27 @@ class TestInverse extends AnyFunSuite {
     val inverse1 = matrix.iterativeInverse(configMemoryOnly.copy(order = 2))
     val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
     assert(testMatrixSimilarity(inverse1.toLocalMatrix(), expected, 1e-8))
+  }
+
+  private def recursiveTestBlockMatrix(n: Int, blockSize: Int): BlockMatrix = {
+    val blocks = (for {
+      i <- 0 until n by blockSize
+      j <- 0 until n by blockSize
+      bi = i / blockSize
+      bj = j / blockSize
+    } yield {
+      val blockRows = math.min(blockSize, n - i)
+      val blockCols = math.min(blockSize, n - j)
+      val data = Array.tabulate(blockRows * blockCols) { idx =>
+        val row = idx % blockRows
+        val col = idx / blockRows
+        if (bi == bj && row == col) 12.0
+        else if (bi == bj) 0.2
+        else 0.01 * (1 + bi + bj + row + col)
+      }
+      ((bi, bj), new DenseMatrix(blockRows, blockCols, data))
+    }).toSeq
+    new BlockMatrix(sc.parallelize(blocks, numPartitions), blockSize, blockSize)
   }
 
   private def sampleBlockMatrix(): BlockMatrix = {

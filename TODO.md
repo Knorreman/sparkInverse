@@ -6,6 +6,26 @@ Each item includes: description, code location, root cause, proposed fix, effort
 
 ## ✅ Done
 
+### 1. Unpersist Before Lazy Evaluation — COMPLETED
+
+**Priority:** 🔴 Critical  
+**Effort:** Low  
+**Files:** `core/src/main/scala/sparkinverse/block/BlockMatrixOps.scala`, `core/src/test/scala/sparkinverse/TestInverse.scala`
+
+**Implementation:**
+
+- `inverseInternal()` now persists and materializes the assembled output before unpersisting tracked intermediates
+- For checkpointed runs: `persist → checkpoint → count → unpersist parents`
+- For non-checkpointed runs with tracked intermediates: `persist → count → unpersist parents`
+- Prevents repeated recomputation and ensures checkpoint lineage is written before parent caches are released
+
+**Validation:**
+
+- Added recursive tests for checkpointed and non-checkpointed materialization with forced intermediate persistence
+- All 49 core tests pass
+
+---
+
 ### 4. LU-Based Local Inversion (Replace SVD Base Case) — COMPLETED
 
 **Priority:** 🟠 High  
@@ -27,7 +47,7 @@ Each item includes: description, code location, root cause, proposed fix, effort
 
 ---
 
-## 1. Unpersist Before Lazy Evaluation (Correctness Bug)
+## 1. Unpersist Before Lazy Evaluation (Correctness Bug) — COMPLETED
 
 **Priority:** 🔴 Critical  
 **Effort:** Low  
