@@ -40,6 +40,7 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
   private val logger = LoggerFactory.getLogger(classOf[BlockMatrixOps])
   private val iterativeStorageLevel = StorageLevel.MEMORY_AND_DISK_SER
   private val cachedMatrices: ListBuffer[BlockMatrix] = mutable.ListBuffer.empty
+  private val cachedRDDs: ListBuffer[RDD[_]] = mutable.ListBuffer.empty
 
   private case class BlockQuadrants(e: BlockMatrix, f: BlockMatrix, g: BlockMatrix, h: BlockMatrix)
 
@@ -96,25 +97,53 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     shouldPersist
   }
 
-  private def splitQuadrants(m: Int, splitSize: Long, res: Long): BlockQuadrants = {
+  private def splitQuadrants(m: Int, splitSize: Long, res: Long, materializeSharedSplit: Boolean): BlockQuadrants = {
     val rowsPerBlock = matrix.rowsPerBlock
     val colsPerBlock = matrix.colsPerBlock
     val blocks = matrix.blocks
 
-    val e = withName(new BlockMatrix(
-      blocks.filter { case ((i, j), _) => i < m && j < m },
-      rowsPerBlock, colsPerBlock, splitSize, splitSize), "E")
-    val f = withName(new BlockMatrix(
-      blocks.filter { case ((i, j), _) => i < m && j >= m }.map { case ((i, j), block) => ((i, j - m), block) },
-      rowsPerBlock, colsPerBlock, splitSize, res), "F")
-    val g = withName(new BlockMatrix(
-      blocks.filter { case ((i, j), _) => i >= m && j < m }.map { case ((i, j), block) => ((i - m, j), block) },
-      rowsPerBlock, colsPerBlock, res, splitSize), "G")
-    val h = withName(new BlockMatrix(
-      blocks.filter { case ((i, j), _) => i >= m && j >= m }.map { case ((i, j), block) => ((i - m, j - m), block) },
-      rowsPerBlock, colsPerBlock, res, res), "H")
+    if (materializeSharedSplit) {
+      // Compute quadrant classification once, cache it, then derive E/F/G/H as
+      // lazy filters from the shared cached parent. The cached RDD is not
+      // unpersisted here: the quadrant RDDs remain lazy and are consumed later
+      // by inverseInternal, which materializes the final output before cleanup.
+      val tagged: RDD[((Int, Int), ((Int, Int), Matrix))] = blocks.map { case ((i, j), block) =>
+        val qi = if (i < m) 0 else 1
+        val qj = if (j < m) 0 else 1
+        val ni = if (qi == 0) i else i - m
+        val nj = if (qj == 0) j else j - m
+        ((qi, qj), ((ni, nj), block))
+      }
+      tagged.persist(iterativeStorageLevel)
+      tagged.count()
+      cachedRDDs.addOne(tagged)
 
-    BlockQuadrants(e, f, g, h)
+      def quadrant(qi: Int, qj: Int): RDD[((Int, Int), Matrix)] =
+        tagged.filter { case ((a, b), _) => a == qi && b == qj }
+          .map { case (_, blockEntry) => blockEntry }
+
+      BlockQuadrants(
+        withName(new BlockMatrix(quadrant(0, 0), rowsPerBlock, colsPerBlock, splitSize, splitSize), "E"),
+        withName(new BlockMatrix(quadrant(0, 1), rowsPerBlock, colsPerBlock, splitSize, res), "F"),
+        withName(new BlockMatrix(quadrant(1, 0), rowsPerBlock, colsPerBlock, res, splitSize), "G"),
+        withName(new BlockMatrix(quadrant(1, 1), rowsPerBlock, colsPerBlock, res, res), "H")
+      )
+    } else {
+      val e = withName(new BlockMatrix(
+        blocks.filter { case ((i, j), _) => i < m && j < m },
+        rowsPerBlock, colsPerBlock, splitSize, splitSize), "E")
+      val f = withName(new BlockMatrix(
+        blocks.filter { case ((i, j), _) => i < m && j >= m }.map { case ((i, j), block) => ((i, j - m), block) },
+        rowsPerBlock, colsPerBlock, splitSize, res), "F")
+      val g = withName(new BlockMatrix(
+        blocks.filter { case ((i, j), _) => i >= m && j < m }.map { case ((i, j), block) => ((i - m, j), block) },
+        rowsPerBlock, colsPerBlock, res, splitSize), "G")
+      val h = withName(new BlockMatrix(
+        blocks.filter { case ((i, j), _) => i >= m && j >= m }.map { case ((i, j), block) => ((i - m, j - m), block) },
+        rowsPerBlock, colsPerBlock, res, res), "H")
+
+      BlockQuadrants(e, f, g, h)
+    }
   }
 
   private def shiftAndScaleBlocks(blocks: RDD[((Int, Int), Matrix)], rowOffset: Int = 0, colOffset: Int = 0,
@@ -264,9 +293,9 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     logger.info("Input matrix shape: {}, {} At depth={}", matrix.numRows(), matrix.numCols(), depth)
 
     val res = matrix.numRows() - splitSize
-    val BlockQuadrants(e, f, g, h) = splitQuadrants(m, splitSize, res)
-    
     val persistThreshold = config.minBlockSizeForPersistence
+    val materializeSharedSplit = config.useCheckpoints || shouldPersist(matrix, persistThreshold)
+    val BlockQuadrants(e, f, g, h) = splitQuadrants(m, splitSize, res, materializeSharedSplit)
 
     persistAndTrack(e, config.useCheckpoints, shouldPersist(e, persistThreshold))
     persistAndTrack(f, config.useCheckpoints, shouldPersist(f, persistThreshold))
@@ -307,7 +336,7 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     // Persist + materialize the output before unpersisting those parents so
     // callers do not recompute from dropped caches, and so checkpoint() (when
     // enabled) is actually written before parent lineage is released.
-    val shouldMaterializeOutput = config.useCheckpoints || cachedMatrices.nonEmpty
+    val shouldMaterializeOutput = config.useCheckpoints || cachedMatrices.nonEmpty || cachedRDDs.nonEmpty
     if (shouldMaterializeOutput) {
       bm.blocks.persist(iterativeStorageLevel)
     }
@@ -319,6 +348,7 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     }
 
     cachedMatrices.foreach(cached => cached.blocks.unpersist(true))
+    cachedRDDs.foreach(_.unpersist(true))
     bm
   }
 

@@ -26,6 +26,28 @@ Each item includes: description, code location, root cause, proposed fix, effort
 
 ---
 
+### 3. Single-Pass Quadrant Split — COMPLETED
+
+**Priority:** 🟠 High  
+**Effort:** Medium  
+**Files:** `core/src/main/scala/sparkinverse/block/BlockMatrixOps.scala`, `core/src/test/scala/sparkinverse/TestInverse.scala`
+
+**Implementation:**
+
+- `splitQuadrants()` can now tag and cache block quadrants in a single materialized pass
+- Shared tagged split RDD is tracked and cleaned up after recursive output materialization
+- Avoids unsafe early unpersist of lazy quadrant parents
+- Avoids `partitionBy` on four quadrant keys to prevent unnecessary shuffle/skew
+- Gated by checkpointing or `minBlockSizeForPersistence` to avoid extra count/cache overhead on small matrices
+
+**Validation:**
+
+- Added odd block-grid recursive inversion test for uneven quadrant splits
+- Existing recursive checkpoint/non-checkpoint materialization tests exercise shared split lifecycle
+- All 50 core tests pass
+
+---
+
 ### 4. LU-Based Local Inversion (Replace SVD Base Case) — COMPLETED
 
 **Priority:** 🟠 High  
@@ -201,7 +223,7 @@ final case class IterativeInverseConfig(
 
 ---
 
-## 3. Single-Pass Quadrant Split
+## 3. Single-Pass Quadrant Split — COMPLETED
 
 **Priority:** 🟠 High  
 **Effort:** Medium  
