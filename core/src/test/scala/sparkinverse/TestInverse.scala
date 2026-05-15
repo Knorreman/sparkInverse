@@ -165,6 +165,45 @@ class TestInverse extends AnyFunSuite {
     assert(testMatrixSimilarity(right.toLocalMatrix(), expectedWide, 1e-12))
   }
 
+  test("pseudo inverse with Tikhonov regularization") {
+    val tall = sampleRectangularBlockMatrix().transpose
+    val wide = sampleRectangularBlockMatrix()
+
+    // Lambda = 0 should produce the standard pseudo-inverse (backward compatible)
+    val leftDefault = tall.pseudoInverse(PseudoInverseSide.Left, RecursiveInverseConfig(limit = 3, midSplits = 2))
+    val leftLambda0 = tall.pseudoInverse(PseudoInverseSide.Left,
+      RecursiveInverseConfig(limit = 3, midSplits = 2, regularizationLambda = 0.0))
+    assert(testMatrixSimilarity(leftDefault.toLocalMatrix(), leftLambda0.toLocalMatrix(), 1e-14))
+
+    // Lambda > 0 should produce a different (regularized) result
+    val leftReg = tall.pseudoInverse(PseudoInverseSide.Left,
+      RecursiveInverseConfig(limit = 3, midSplits = 2, regularizationLambda = 0.1))
+    assert(leftReg.numRows() == tall.numCols())
+    assert(leftReg.numCols() == tall.numRows())
+
+    // Right pseudo-inverse with regularization
+    val rightReg = wide.pseudoInverse(PseudoInverseSide.Right,
+      RecursiveInverseConfig(limit = 3, midSplits = 2, regularizationLambda = 0.1))
+    assert(rightReg.numRows() == wide.numCols())
+    assert(rightReg.numCols() == wide.numRows())
+
+    // Larger lambda should shrink result toward zero (ridge shrinkage)
+    val leftLargeLambda = tall.pseudoInverse(PseudoInverseSide.Left,
+      RecursiveInverseConfig(limit = 3, midSplits = 2, regularizationLambda = 100.0))
+    val leftNormSmall = leftReg.toLocalMatrix().toArray.map(math.abs).sum
+    val leftNormLarge = leftLargeLambda.toLocalMatrix().toArray.map(math.abs).sum
+    assert(leftNormLarge < leftNormSmall,
+      s"Larger lambda should shrink pseudo-inverse: lambda=0.1 norm=$leftNormSmall, lambda=100 norm=$leftNormLarge")
+  }
+
+  test("pseudo inverse rejects negative regularization lambda") {
+    val matrix = sampleRectangularBlockMatrix()
+    assertThrows[IllegalArgumentException] {
+      matrix.pseudoInverse(PseudoInverseSide.Left,
+        RecursiveInverseConfig(limit = 3, midSplits = 2, regularizationLambda = -0.1))
+    }
+  }
+
   test("coordinate add and subtract through syntax") {
     val entries1 = sc.parallelize(Seq(MatrixEntry(0, 0, 1.0), MatrixEntry(1, 1, 2.0)))
     val entries2 = sc.parallelize(Seq(MatrixEntry(0, 1, 3.0), MatrixEntry(1, 0, 4.0)))

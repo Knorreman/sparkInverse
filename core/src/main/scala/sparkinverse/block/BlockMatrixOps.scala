@@ -279,6 +279,8 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
 
   private[block] def inverseInternal(config: RecursiveInverseConfig, depth: Int): BlockMatrix = {
     validateInverseInputs(config.useCheckpoints)
+    require(config.regularizationLambda >= 0.0,
+      s"Regularization lambda must be non-negative. Got regularizationLambda=${config.regularizationLambda}.")
     val colsPerBlock = matrix.colsPerBlock
     val rowsPerBlock = matrix.rowsPerBlock
     val midSplits = effectiveMidDimSplits(config.midSplits)
@@ -894,6 +896,7 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
   def pseudoInverse(side: PseudoInverseSide): BlockMatrix = pseudoInverse(side, RecursiveInverseConfig())
 
   def pseudoInverse(side: PseudoInverseSide, config: RecursiveInverseConfig): BlockMatrix = {
+    val lambda = config.regularizationLambda
     val at = matrix.transpose
     val persistedAt = persistIfNeeded(at.blocks, iterativeStorageLevel)
     try {
@@ -904,11 +907,26 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
       }
       val persistedGram = persistIfNeeded(gram.blocks, iterativeStorageLevel)
       try {
+        val gramToInvert = if (lambda > 0.0) {
+          // Tikhonov regularization: invert (Gram + λI) instead of Gram.
+          // Damps small singular values: σᵢ/(σᵢ² + λ) instead of 1/σᵢ.
+          // Improves condition number from κ(A)² to (σ₁²+λ)/(σₙ²+λ).
+          val regEye = MatrixInternals.eyeBlockMatrix(
+            gram.numRows(), lambda,
+            gram.rowsPerBlock, gram.colsPerBlock,
+            iterativeStorageLevel, gram)
+          val regGram = gram.add(regEye)
+          regEye.blocks.unpersist(false)
+          regGram
+        } else {
+          gram
+        }
+
         side match {
           case PseudoInverseSide.Left =>
-            new BlockMatrixOps(gram).inverse(config).multiply(at, midSplits)
+            new BlockMatrixOps(gramToInvert).inverse(config).multiply(at, midSplits)
           case PseudoInverseSide.Right =>
-            at.multiply(new BlockMatrixOps(gram).inverse(config), midSplits)
+            at.multiply(new BlockMatrixOps(gramToInvert).inverse(config), midSplits)
         }
       } finally {
         if (persistedGram) gram.blocks.unpersist(false)

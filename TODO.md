@@ -111,6 +111,46 @@ Each item includes: description, code location, root cause, proposed fix, effort
 
 ---
 
+### 5. A Caching in Iterative Loop — COMPLETED
+
+**Priority:** 🟢 Low  
+**Effort:** Low  
+**Files:** `core/src/main/scala/sparkinverse/block/BlockMatrixOps.scala`
+
+**Implementation:**
+
+- Added `matrix.blocks.count()` after `persist()` in `iterativeInverseInternal` to force cache materialization before the iterative loop starts
+- Input matrix A is now guaranteed cached before the first multiply
+- Skipped `pseudoInverse` — no loop, no repeated recomputation benefit
+
+**Validation:**
+
+- All 56 core tests pass
+- bench/compile passes
+
+---
+
+### 12. No Regularization for Pseudo-Inverse — COMPLETED
+
+**Priority:** 🟡 Medium  
+**Effort:** Low  
+**Files:** `core/src/main/scala/sparkinverse/api/Configs.scala`, `core/src/main/scala/sparkinverse/block/BlockMatrixOps.scala`, `core/src/test/scala/sparkinverse/TestInverse.scala`, `README.md`
+
+**Implementation:**
+
+- Added `regularizationLambda: Double = 0.0` to `RecursiveInverseConfig`
+- Validates lambda >= 0
+- When lambda > 0, `pseudoInverse` adds λI to the Gram matrix before inversion (Tikhonov regularization)
+- Identity matrix constructed via `MatrixInternals.eyeBlockMatrix` and unpersisted after use
+- Backward compatible: lambda = 0.0 preserves standard Moore-Penrose behavior
+
+**Validation:**
+
+- Added tests: backward compatibility (lambda=0), regularization changes result, Left/Right sides, ridge shrinkage, negative lambda rejection
+- All 58 core tests pass
+
+---
+
 ## 1. Unpersist Before Lazy Evaluation (Correctness Bug) — COMPLETED
 
 **Priority:** 🔴 Critical  
@@ -1089,7 +1129,7 @@ For a diagonally dominant matrix with κ = 10⁴:
 
 ---
 
-## 12. No Regularization for Pseudo-Inverse
+## 12. No Regularization for Pseudo-Inverse — COMPLETED
 
 **Priority:** 🟡 Medium  
 **Effort:** Low  
