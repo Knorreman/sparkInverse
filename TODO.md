@@ -90,6 +90,27 @@ Each item includes: description, code location, root cause, proposed fix, effort
 
 ---
 
+### 13. Dead Code — `previousMetric` — COMPLETED
+
+**Priority:** 🟢 Low  
+**Effort:** Minimal  
+**Files:** `core/src/main/scala/sparkinverse/block/BlockMatrixOps.scala`, `core/src/test/scala/sparkinverse/TestInverse.scala`
+
+**Implementation:**
+
+- Renamed `previousMetric` → `lastMetric` (already done via convergenceCheckInterval refactor)
+- Added divergence detection: `metric > lastMetric * 2 && lastMetric > tolerance` inside `metricOpt.foreach`
+- Added alpha-refinement divergence warning when `metricNew > metric * 2`
+- Fixed `1 % checkpointEvery` bug → `iter % checkpointEvery` in adaptive alpha branch
+- Non-convergence warning updated to "Last checked metric"
+
+**Validation:**
+
+- Added tests: divergence detection on well-conditioned matrix, non-convergence still returns result
+- All 56 core tests pass
+
+---
+
 ## 1. Unpersist Before Lazy Evaluation (Correctness Bug) — COMPLETED
 
 **Priority:** 🔴 Critical  
@@ -1163,7 +1184,7 @@ if (gramDiagMin < 1e-6 && config.regularizationLambda == 0.0) {
 
 ---
 
-## 13. Dead Code — `previousMetric`
+## 13. Dead Code — `previousMetric` — COMPLETED
 
 **Priority:** 🟢 Low  
 **Effort:** Minimal  

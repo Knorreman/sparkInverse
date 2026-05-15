@@ -778,6 +778,11 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
           logger.info("{}: Adaptive alpha refined: alpha={} -> {}, metric={} -> {}",
             algorithmName, alpha, currentAlpha, metric, metricNew)
 
+          if (metricNew > metric * 2) {
+            logger.warn("{}: refined alpha worsened convergence at iter=1 (metric={} -> {}).",
+              algorithmName, metric, metricNew)
+          }
+
           ax.blocks.unpersist(true)
           residual.blocks.unpersist(true)
 
@@ -794,7 +799,7 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
             val oldX = x
             x = xNew
             x.blocks.persist(storageLevel)
-            if (1 % checkpointEvery == 0) {  // iter is effectively 1 here
+            if (iter % checkpointEvery == 0) {  // iter is 1 here
               MatrixInternals.maybeCheckpoint(x.blocks, config.useCheckpoints)
               x.blocks.count()
             }
@@ -836,6 +841,14 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
       } else {
         // Normal iteration (not first-iteration adaptive refinement)
         metricOpt.foreach { metric =>
+          // Divergence detection: if residual norm is growing significantly,
+          // the iteration may be diverging due to poor initial scaling.
+          // Guard with lastMetric > tolerance to avoid false positives near convergence.
+          if (metric > lastMetric * 2 && lastMetric > config.tolerance) {
+            logger.warn("{}: possible divergence detected at iter={} (metric={}, prev={}). " +
+              "Consider using a smaller alpha or preconditioning.",
+              algorithmName, iter, metric, lastMetric)
+          }
           lastMetric = metric
           if (metric < config.tolerance) {
             converged = true
