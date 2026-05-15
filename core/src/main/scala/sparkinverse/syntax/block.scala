@@ -14,6 +14,7 @@ object block {
       ops.iterativeInverse(config)
     def localInverse(): BlockMatrix = ops.localInverse()
     def svdInverse(): BlockMatrix = ops.svdInverse()
+    def luInverse(): BlockMatrix = ops.luInverse()
     def pseudoInverse(side: PseudoInverseSide): BlockMatrix = ops.pseudoInverse(side)
     def pseudoInverse(side: PseudoInverseSide, config: RecursiveInverseConfig): BlockMatrix = ops.pseudoInverse(side, config)
     def normOne(): Double = ops.normOne()
