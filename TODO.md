@@ -609,7 +609,7 @@ The `count()` is cheap if A is small relative to the iterative computations, and
 
 ---
 
-## 1. Unpersist Before Lazy Evaluation (Correctness Bug) — COMPLETED
+## 6. Adaptive Iteration Order — Historical Analysis
 
 ### Problem
 
@@ -783,91 +783,38 @@ Option B1 only scans diagonal blocks (O(n) instead of O(n²)) and Option B2 cost
 
 ---
 
-## 8. CoordinateMatrix Always Densifies — COMPLETED
+## 8. CoordinateMatrix Adaptive Block-Size Densification — COMPLETED
 
 **Priority:** 🟢 Low (high impact for sparse matrices, but high implementation effort)  
-**Effort:** High  
-**Files:** `core/src/main/scala/sparkinverse/coordinate/CoordinateMatrixOps.scala`
+**Effort:** Medium  
+**Files:** `core/src/main/scala/sparkinverse/coordinate/CoordinateMatrixOps.scala`, `core/src/test/scala/sparkinverse/TestInverse.scala`
 
-### Problem
+**Implementation:**
 
-```scala
-private def toBlock = matrix.toBlockMatrix(defaultBlockSize, defaultBlockSize)
+- Replaced fixed default coordinate block size (`min(1024, min(rows, cols))`) with an adaptive sparsity-based heuristic.
+- `CoordinateMatrixOps` now computes matrix density as `entries.count() / (rows * cols)` once (lazy) per operation instance.
+- Added adaptive bands in `CoordinateMatrixOps.adaptiveBlockSize(minDim, density)`:
+  - `< 1e-4` → 32
+  - `< 1e-3` → 64
+  - `< 1e-2` → 128
+  - `< 5e-2` → 256
+  - `< 2e-1` → 512
+  - else → 1024
+- Block size is clamped to `[1, min(rows, cols)]` for safety.
+- Added `selectedBlockSizeForTesting` (package-visible) to validate behavior without changing public API.
 
-private def defaultBlockSize: Int = {
-  val maxSize = math.min(matrix.numRows(), matrix.numCols())
-  math.max(1, math.min(1024L, maxSize).toInt)
-}
-```
+**Validation:**
 
-Every `CoordinateMatrixOps` operation converts to `BlockMatrix` (dense blocks) via `toBlockMatrix()`. For a sparse 10000×10000 matrix with 0.1% density:
+- Added tests:
+  - heuristic threshold mapping
+  - sparse coordinate matrix selects a small block size
+- `core/test` passes (63 tests)
+- `bench/compile` passes
 
-- Original data: ~100KB as `CoordinateMatrix`
-- After `toBlockMatrix(1024, 1024)`: ~100 dense 1024×1024 blocks × 8MB each = ~800MB
+**Notes:**
 
-The `defaultBlockSize` of 1024 creates very large dense blocks regardless of sparsity. For sparse data, smaller blocks or sparse representations would be much more efficient.
-
-### Fix Option A — Adaptive block size based on sparsity
-
-```scala
-private def toBlock = {
-  val numEntries = matrix.entries.count()  // one action — expensive but informs block size
-  val nnz = numEntries.toDouble
-  val totalElements = matrix.numRows() * matrix.numCols()
-  val density = nnz / totalElements
-
-  val blockSize = if (density < 0.001) {
-    // Very sparse: small blocks to avoid dense waste
-    math.max(1, math.min(64, math.min(matrix.numRows(), matrix.numCols()).toInt))
-  } else if (density < 0.05) {
-    math.max(1, math.min(256, math.min(matrix.numRows(), matrix.numCols()).toInt))
-  } else if (density < 0.3) {
-    math.max(1, math.min(512, math.min(matrix.numRows(), matrix.numCols()).toInt))
-  } else {
-    math.max(1, math.min(1024, math.min(matrix.numRows(), matrix.numCols()).toInt))
-  }
-
-  matrix.toBlockMatrix(blockSize, blockSize)
-}
-```
-
-The `count()` action is expensive, but it only happens once per operation chain.
-
-### Fix Option B — Sparse Newton-Schulz path (major implementation)
-
-Implement the iterative inverse entirely in `CoordinateMatrix` format, avoiding densification:
-
-```scala
-def iterativeInverse(config: IterativeInverseConfig): CoordinateMatrix = {
-  val density = estimateDensity()
-  if (density < 0.05) {
-    // Sparse path: stay in coordinate form
-    val alpha = coordinateFrobeniusNormSquared()  // cheap for sparse
-    var x = transpose().scalarMultiply(alpha)       // CoordinateMatrix
-    for (iter <- 1 to config.maxIter) {
-      val ax = multiply(x)                          // CoordinateMatrix × CoordinateMatrix
-      val residual = identity().subtract(ax)         // CoordinateMatrix
-      if (converged(residual)) return x
-      val correction = buildCoordHyperpowerCorrection(residual, config.order)
-      x = x.multiply(correction)                    // CoordinateMatrix × CoordinateMatrix
-    }
-    x
-  } else {
-    // Dense path: convert to BlockMatrix (existing implementation)
-    fromBlock(_.iterativeInverse(config))
-  }
-}
-```
-
-This leverages the existing `multiply`, `add`, `subtract`, `transpose` operations on `CoordinateMatrix` that are already implemented in `CoordinateMatrixOps`. The key missing pieces are:
-
-- `identity(): CoordinateMatrix` (create identity in coordinate form — already available in `MatrixInternals.eyeCoordinateMatrix`)
-- `buildCoordHyperpowerCorrection`: CoordinateMatrix version of residual power computation
-- Convergence check using coordinate Frobenius norm (already available)
-
-### Recommendation
-
-Start with Option A (adaptive block size) as it's low-effort and handles the worst cases. Option B is a larger project that should be prioritized based on user demand for sparse matrix support.
+- This completes TODO #8 Option A (adaptive densification).
+- Full sparse iterative inversion path remains out of scope (future work).
 
 ---
 
