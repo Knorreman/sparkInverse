@@ -8,6 +8,7 @@ lazy val commonSettings = Seq(
   libraryDependencies ++= Seq(
     "org.apache.spark" %% "spark-core" % sparkVersion,
     "org.apache.spark" %% "spark-mllib" % sparkVersion,
+    "org.apache.commons" % "commons-math3" % "3.6.1",
     "org.scalatest" %% "scalatest" % scalatestVersion % Test
   ),
   javaOptions ++= Seq(

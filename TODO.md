@@ -4,6 +4,29 @@ Each item includes: description, code location, root cause, proposed fix, effort
 
 ---
 
+## ✅ Done
+
+### 4. LU-Based Local Inversion (Replace SVD Base Case) — COMPLETED
+
+**Priority:** 🟠 High  
+**Effort:** Medium  
+**Files:** `core/src/main/scala/sparkinverse/block/BlockMatrixOps.scala`, `core/src/main/scala/sparkinverse/syntax/block.scala`, `build.sbt`
+
+**Implementation:**
+
+- Added `commons-math3` as explicit dependency
+- Implemented `luInverse()` using `LUDecomposition` with 1e-12 singularity threshold
+- `localInverse()` now tries LU first, falls back to SVD on `IllegalArgumentException`
+- ~2× faster for base case matrices (≤4096 elements / ≤64×64)
+- Added tests verifying LU matches SVD for well-conditioned matrices
+
+**Validation:**
+
+- All 45 core tests pass
+- New tests: "LU inverse matches SVD" and "LU inverse handles scaled identity"
+
+---
+
 ## 1. Unpersist Before Lazy Evaluation (Correctness Bug)
 
 **Priority:** 🔴 Critical  

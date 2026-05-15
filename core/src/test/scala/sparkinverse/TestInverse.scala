@@ -81,6 +81,23 @@ class TestInverse extends AnyFunSuite {
     assert(testMatrixSimilarity(matrix.localInverse().toLocalMatrix(), expected, 1e-12))
   }
 
+  test("LU inverse matches SVD for well-conditioned matrix") {
+    val matrix = diagonallyDominantBlockMatrix()
+    val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
+    val luInv = matrix.luInverse().toLocalMatrix()
+    val svdInv = matrix.svdInverse().toLocalMatrix()
+    assert(testMatrixSimilarity(luInv, expected, 1e-12))
+    assert(testMatrixSimilarity(svdInv, expected, 1e-12))
+    assert(testMatrixSimilarity(luInv, svdInv, 1e-14))
+  }
+
+  test("LU inverse handles scaled identity correctly") {
+    val matrix = identityBlockMatrix(4).scalarMultiply(10.0)
+    val expected = identityBlockMatrix(4).scalarMultiply(0.1)
+    val luInv = matrix.luInverse().toLocalMatrix()
+    assert(testMatrixSimilarity(luInv, expected.toLocalMatrix(), 1e-12))
+  }
+
   test("coordinate local inverse and syntax methods") {
     val matrix = sampleBlockMatrix().toCoordinateMatrix()
     val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
