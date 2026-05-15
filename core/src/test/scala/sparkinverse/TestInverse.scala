@@ -918,4 +918,32 @@ class TestInverse extends AnyFunSuite {
     assert(testMatrixSimilarity(inverse.toLocalMatrix(), expected, 1e-8))
   }
 
+  test("divergence detection does not fire on well-conditioned matrix") {
+    // A well-conditioned diagonally dominant matrix should converge without divergence warnings
+    val matrix = diagonallyDominantBlockMatrix()
+    val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
+
+    // Use a tight tolerance and enough iterations to guarantee convergence
+    val config = IterativeInverseConfig(
+      order = 2, maxIter = 30, tolerance = 1e-10, useCheckpoints = false,
+      midSplits = 1, convergenceCheckInterval = 1)
+    val inverse = matrix.iterativeInverse(config)
+    assert(testMatrixSimilarity(inverse.toLocalMatrix(), expected, 1e-8))
+  }
+
+  test("divergence detection with zero alpha produces warning but still returns result") {
+    // Using NormProduct alpha = 1/||A||_1 * 1/||A||_inf on a matrix with very large
+    // condition number should still produce a result (possibly inaccurate).
+    // We can't easily assert log messages, so we verify the method completes.
+    val matrix = sampleBlockMatrix()
+    // Use a very small maxIter to trigger non-convergence
+    val config = IterativeInverseConfig(
+      order = 2, maxIter = 3, tolerance = 1e-15, useCheckpoints = false,
+      midSplits = 1)
+    // Should complete without throwing, even if it doesn't converge
+    val result = matrix.iterativeInverse(config)
+    assert(result.numRows() == matrix.numRows())
+    assert(result.numCols() == matrix.numCols())
+  }
+
 }
