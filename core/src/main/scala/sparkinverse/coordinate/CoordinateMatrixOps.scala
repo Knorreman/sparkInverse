@@ -6,13 +6,31 @@ import org.apache.spark.mllib.linalg.distributed.{CoordinateMatrix, MatrixEntry}
 import sparkinverse.api.{IterativeInverseConfig, PseudoInverseSide, RecursiveInverseConfig}
 import sparkinverse.block.BlockMatrixOps
 
+object CoordinateMatrixOps {
+  private[sparkinverse] def adaptiveBlockSize(minDim: Int, density: Double): Int = {
+    val rawSize =
+      if (density < 1e-4) 32
+      else if (density < 1e-3) 64
+      else if (density < 1e-2) 128
+      else if (density < 5e-2) 256
+      else if (density < 2e-1) 512
+      else 1024
+
+    math.max(1, math.min(rawSize, minDim))
+  }
+}
+
 final class CoordinateMatrixOps private[sparkinverse] (val matrix: CoordinateMatrix) {
-  private def defaultBlockSize: Int = {
-    val maxSize = math.min(matrix.numRows(), matrix.numCols())
-    math.max(1, math.min(1024L, maxSize).toInt)
+  private lazy val defaultBlockSize: Int = {
+    val minDim = math.max(1L, math.min(matrix.numRows(), matrix.numCols())).toInt
+    val total = matrix.numRows().toDouble * matrix.numCols().toDouble
+    val density = if (total <= 0.0) 1.0 else matrix.entries.count().toDouble / total
+    CoordinateMatrixOps.adaptiveBlockSize(minDim, density)
   }
 
   private def toBlock = matrix.toBlockMatrix(defaultBlockSize, defaultBlockSize)
+
+  private[sparkinverse] def selectedBlockSizeForTesting: Int = defaultBlockSize
 
   private def fromBlock(blockOps: BlockMatrixOps => org.apache.spark.mllib.linalg.distributed.BlockMatrix): CoordinateMatrix =
     blockOps(new BlockMatrixOps(toBlock)).toCoordinateMatrix()
