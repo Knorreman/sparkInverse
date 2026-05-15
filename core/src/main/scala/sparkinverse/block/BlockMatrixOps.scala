@@ -5,7 +5,7 @@ import org.apache.spark.mllib.linalg.distributed.{BlockMatrix, CoordinateMatrix,
 import org.apache.spark.mllib.linalg.{DenseMatrix, DenseVector, Matrix, SparseMatrix}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
-import sparkinverse.api.{IterativeInverseConfig, PseudoInverseSide, RecursiveInverseConfig}
+import sparkinverse.api.{AlphaStrategy, IterativeInverseConfig, PseudoInverseSide, RecursiveInverseConfig}
 import sparkinverse.core.MatrixInternals
 
 import scala.collection.mutable
@@ -252,6 +252,9 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     bm
   }
 
+  /** Compute ‖A‖₁, the maximum absolute column sum.
+    * Cost: 1 shuffle + 1 distributed max action.
+    */
   def normOne(): Double = {
     val cpb = matrix.colsPerBlock
     matrix.blocks.flatMap { case ((_, j), mat) =>
@@ -274,6 +277,9 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     }.reduceByKey(_ + _).values.max()
   }
 
+  /** Compute ‖A‖∞, the maximum absolute row sum.
+    * Cost: 1 shuffle + 1 distributed max action.
+    */
   def normInf(): Double = {
     val rpb = matrix.rowsPerBlock
     matrix.blocks.flatMap { case ((i, _), mat) =>
@@ -398,6 +404,7 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
   private def buildHyperpowerCorrection(eye: BlockMatrix, residual: BlockMatrix, order: Int,
                                         midSplits: Int, storageLevel: StorageLevel): (BlockMatrix, Seq[BlockMatrix]) = {
     require(order >= 2, "hyperpower order must be at least 2")
+    // Classical hyperpower correction: C = I + R + R² + ... + R^{order-1}
     var correction = eye.add(residual)
     val extraPowers = buildHyperpowerPowers(residual, order - 1, midSplits, storageLevel)
     extraPowers.foreach { power =>
@@ -430,15 +437,175 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     correction
   }
 
+  // ── Initial scaling computation ──────────────────────────────────────────
+
+  /** Compute the initial scaling α for X₀ = α·Aᵀ using the chosen strategy. */
+  private def computeInitialAlpha(config: IterativeInverseConfig): Double = {
+    val midSplits = math.max(1, config.midSplits)
+
+    config.alphaStrategy match {
+      case AlphaStrategy.NormProduct =>
+        // Original strategy: α = 1/(‖A‖₁ · ‖A‖_∞)
+        // Cost: 2 shuffles + 2 actions (one per norm)
+        val norm1 = normOne()
+        val normInfValue = normInf()
+        val alpha = 1.0 / (norm1 * normInfValue)
+        logger.info("Alpha strategy=NormProduct: ||A||_1={}, ||A||_inf={}, alpha={}",
+          norm1, normInfValue, alpha)
+        alpha
+
+      case AlphaStrategy.Frobenius =>
+        // α = 1/‖A‖²_F since ‖A‖²_F = Σσᵢ² ≥ σ₁².
+        // Cost: 1 Spark action (map + sum, no shuffle)
+        val frobSq = frobeniusNormSquared()
+        val alpha = 1.0 / frobSq
+        logger.info("Alpha strategy=Frobenius: ||A||_F^2={}, alpha={}", frobSq, alpha)
+        alpha
+
+      case AlphaStrategy.PowerIteration(iters) =>
+        // α = 1/σ₁² estimated via power iteration on AᵀA.
+        // Cost: 2·iters distributed matrix multiplies.
+        powerIterationAlpha(iters, midSplits)
+
+      case AlphaStrategy.Adaptive =>
+        // Start with Frobenius, then conservatively refine after first iteration.
+        val frobSq = frobeniusNormSquared()
+        val alpha0 = 1.0 / frobSq
+        logger.info("Alpha strategy=Adaptive (initial): ||A||_F^2={}, alpha0={}", frobSq, alpha0)
+        alpha0
+    }
+  }
+
+  /** Estimate α = 1/σ₁² via power iteration on AᵀA.
+    *
+    * The power iteration v_{k+1} = AᵀA·v_k / ‖AᵀA·v_k‖ converges to
+    * the dominant eigenvector of AᵀA with eigenvalue σ₁². The Rayleigh
+    * quotient vᵀ(AᵀA)v / vᵀv estimates σ₁².
+    */
+  private def powerIterationAlpha(iterations: Int, midSplits: Int): Double = {
+    require(iterations > 0, s"PowerIteration requires powerIterations > 0, got $iterations")
+
+    val n = matrix.numRows()
+    val at = matrix.transpose
+    at.blocks.persist(StorageLevel.MEMORY_AND_DISK_SER)
+
+    // Initialize with a random vector (deterministic seed for reproducibility).
+    val seed = 42L
+    val rpb = matrix.rowsPerBlock
+    val cpb = matrix.colsPerBlock
+    var v = MatrixInternals.randomBlockVector(n, cpb, rpb, matrix.blocks.sparkContext, seed)
+    v.blocks.persist(StorageLevel.MEMORY_AND_DISK_SER)
+    v.blocks.count()
+
+    var sigmaSqEstimate = 1.0
+    var iter = 0
+    while (iter < iterations) {
+      val av = matrix.multiply(v, midSplits)
+      av.blocks.persist(StorageLevel.MEMORY_AND_DISK_SER)
+
+      val atav = at.multiply(av, midSplits)
+      atav.blocks.persist(StorageLevel.MEMORY_AND_DISK_SER)
+
+      val vDotV = blockVectorDot(v, v)
+      val vDotAtav = blockVectorDot(v, atav)
+      val atavFrobSq = new BlockMatrixOps(atav).frobeniusNormSquared()
+
+      sigmaSqEstimate = if (vDotV > 0.0) vDotAtav / vDotV else 1.0
+      if (sigmaSqEstimate <= 0.0 || atavFrobSq <= 0.0) {
+        throw new IllegalArgumentException(
+          s"PowerIteration failed to estimate a positive σ₁² (estimate=$sigmaSqEstimate, ||AᵀAv||²=$atavFrobSq)")
+      }
+
+      val vNew = new BlockMatrixOps(atav).scalarMultiply(1.0 / math.sqrt(atavFrobSq))
+      vNew.blocks.setName(s"powerIteration_v_$iter")
+
+      v.blocks.unpersist(true)
+      av.blocks.unpersist(true)
+      atav.blocks.unpersist(true)
+
+      v = vNew
+      v.blocks.persist(StorageLevel.MEMORY_AND_DISK_SER)
+      v.blocks.count()
+      iter += 1
+    }
+
+    v.blocks.unpersist(true)
+    at.blocks.unpersist(true)
+
+    val alpha = 1.0 / sigmaSqEstimate
+    logger.info("Alpha strategy=PowerIteration(iter={}): sigma1_sq_est={}, alpha={}",
+      iterations, sigmaSqEstimate, alpha)
+    alpha
+  }
+
+  /** Dot product of two block vectors with identical block layout. */
+  private def blockVectorDot(left: BlockMatrix, right: BlockMatrix): Double = {
+    left.blocks.join(right.blocks).map { case (_, (l, r)) =>
+      val la = l.toArray
+      val ra = r.toArray
+      require(la.length == ra.length, s"Cannot dot blocks of different sizes: ${la.length} vs ${ra.length}")
+      var idx = 0
+      var sum = 0.0
+      while (idx < la.length) {
+        sum += la(idx) * ra(idx)
+        idx += 1
+      }
+      sum
+    }.sum()
+  }
+
+  /** Conservatively refine α from the first-iteration residual.
+    *
+    * After one Newton-Schulz step with X₀ = α₀·Aᵀ, we have
+    * A·X₀ = α₀·A·Aᵀ, whose squared Frobenius norm gives:
+    *   ‖α₀·A·Aᵀ‖²_F = α₀² · ‖A·Aᵀ‖²_F
+    *
+    * The largest singular value σ₁² can be bounded by Gelfand's formula:
+    *   σ₁² ≈ ‖(AᵀA)^k‖_F^{1/k}  for large k
+    *
+    * But a cheaper estimate from the first residual R₀ = I - α₀·A·Aᵀ is:
+    *   σ₁²(A) ≈ 1/α₀ · max(1 - ε, 1 + ε)  where ε = ‖R₀‖_F/√n
+    *
+    * We use this to compute α_refined = 1/σ₁²_est.
+    */
+  private def refineAlphaAdaptive(alpha0: Double, residual: BlockMatrix, n: Long, iterationNum: Int): Double = {
+    val resFrobSq = new BlockMatrixOps(residual).frobeniusNormSquared()
+    val eps = math.sqrt(resFrobSq) / math.sqrt(n.toDouble)
+
+    // The residual R = I - α₀·A·Aᵀ has singular values 1 - α₀·σᵢ².
+    // If convergence is happening, the singular values of (I+R) are near 1.
+    // We estimate σ₁² ≈ (1 + eps) / α₀ to get the refined alpha.
+    // But we guard: if eps > 1, the initial alpha was way off.
+    if (eps >= 1.0) {
+      // The residual is too large for a reliable estimate.
+      // Fall back to Frobenius estimate.
+      logger.info("Adaptive alpha: residual norm too large (eps={}), keeping alpha0={}", eps, alpha0)
+      return alpha0
+    }
+
+    // Singular values of α₀·AᵀA are in [1-ε, 1+ε].
+    // So σᵢ²(A) are in [(1-ε)/α₀, (1+ε)/α₀].
+    // The optimal α = 1/σ₁² ≈ 1/((1+ε)/α₀) = α₀/(1+ε)
+    val alphaRefined = alpha0 / (1.0 + eps)
+    // Guard against alpha getting too large (divergence risk)
+    val safeAlpha = math.min(alphaRefined, alpha0 * 2.0)
+
+    logger.info("Adaptive alpha refinement at iter={}: eps={}, alpha0={}, alphaRefined={}, safeAlpha={}",
+      iterationNum, eps, alpha0, alphaRefined, safeAlpha)
+    safeAlpha
+  }
+
+  // ── Main iterative inverse ──────────────────────────────────────────────────
+
   private def iterativeInverseInternal(config: IterativeInverseConfig): BlockMatrix = {
     val order = config.order
-    val algorithmName = s"iterativeInverse(order=$order)"
+    val algorithmName = s"iterativeInverse(order=$order,alpha=${config.alphaStrategy})"
     require(order >= 2 && order <= 10,
       s"Iterative inverse order should be between 2 and 10 for numerical stability. Got order=$order.")
     require(!config.useCheckpoints || matrix.blocks.sparkContext.getCheckpointDir.isDefined,
       "Checkpoint directory must be configured when useCheckpoints=true. " +
       "Use sc.setCheckpointDir() to set the checkpoint directory.")
-    require(matrix.numRows() == matrix.numCols(), 
+    require(matrix.numRows() == matrix.numCols(),
       s"Matrix must be square for inversion. Found ${matrix.numRows()} rows and ${matrix.numCols()} columns.")
     require(config.maxIter > 0, s"Maximum iterations must be positive. Got maxIter=${config.maxIter}.")
     require(config.tolerance > 0, s"Tolerance must be positive. Got tolerance=${config.tolerance}.")
@@ -452,14 +619,12 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     }
 
     val n = matrix.numRows()
-    val norm1 = normOne()
-    val normInfValue = normInf()
-    val alpha = 1.0 / (norm1 * normInfValue)
+    val alpha = computeInitialAlpha(config)
 
-    logger.info("{}: n={}, ||A||_1={}, ||A||_inf={}, alpha={}, order={}",
-      algorithmName, n, norm1, normInfValue, alpha, order)
+    logger.info("{}: n={}, alpha={}, order={}", algorithmName, n, alpha, order)
 
-    var x = new BlockMatrixOps(matrix.transpose).scalarMultiply(alpha)
+    var currentAlpha = alpha
+    var x = new BlockMatrixOps(matrix.transpose).scalarMultiply(currentAlpha)
     x.blocks.persist(storageLevel)
     MatrixInternals.maybeCheckpoint(x.blocks, config.useCheckpoints)
 
@@ -467,7 +632,7 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
 
     var converged = false
     var iter = 0
-    var previousMetric = Double.MaxValue
+    var lastMetric = Double.MaxValue
 
     while (iter < config.maxIter && !converged) {
       iter += 1
@@ -478,33 +643,113 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
       residual.blocks.persist(storageLevel)
       val metric = math.sqrt(new BlockMatrixOps(residual).frobeniusNormSquared()) / n
       logger.debug("{} iter={}: ||I - A*X||_F / n = {}", algorithmName, iter, metric)
-      previousMetric = metric
-      
-      if (metric < config.tolerance) {
-        converged = true
-      }
 
-      if (!converged) {
-        val (correction, extraPowers) = buildHyperpowerCorrection(eye, residual, order, midSplits, storageLevel)
-        val xNew = x.multiply(correction, midSplits)
-        val oldX = x
-        x = xNew
-        x.blocks.persist(storageLevel)
-        if (iter % checkpointEvery == 0) {
+      // Adaptive alpha refinement: after first iteration, use the residual
+      // to improve our estimate of σ₁² and thus α.
+      if (iter == 1 && config.alphaStrategy == AlphaStrategy.Adaptive) {
+        val refinedAlpha = refineAlphaAdaptive(currentAlpha, residual, n, iter)
+        if (refinedAlpha != currentAlpha) {
+          // Restart with refined alpha
+          x.blocks.unpersist(true)
+          currentAlpha = refinedAlpha
+          x = new BlockMatrixOps(matrix.transpose).scalarMultiply(currentAlpha)
+          x.blocks.persist(storageLevel)
           MatrixInternals.maybeCheckpoint(x.blocks, config.useCheckpoints)
-          x.blocks.count()
-        }
-        oldX.blocks.unpersist(true)
-        extraPowers.foreach(_.blocks.unpersist(true))
-      }
 
-      residual.blocks.unpersist(true)
-      ax.blocks.unpersist(true)
+          // Recompute residual with new X
+          val axNew = matrix.multiply(x, midSplits)
+          axNew.blocks.persist(storageLevel)
+          val residualNew = eye.subtract(axNew)
+          residualNew.blocks.persist(storageLevel)
+          val metricNew = math.sqrt(new BlockMatrixOps(residualNew).frobeniusNormSquared()) / n
+          logger.info("{}: Adaptive alpha refined: alpha={} -> {}, metric={} -> {}",
+            algorithmName, alpha, currentAlpha, metric, metricNew)
+
+          ax.blocks.unpersist(true)
+          residual.blocks.unpersist(true)
+
+          // Replace ax, residual, metric with refined versions
+          // We skip the convergence check since we just started
+          if (metricNew < config.tolerance) {
+            converged = true
+          }
+
+          if (!converged) {
+            val (correction, extraPowers) = buildHyperpowerCorrection(
+              eye, residualNew, order, midSplits, storageLevel)
+            val xNew = x.multiply(correction, midSplits)
+            val oldX = x
+            x = xNew
+            x.blocks.persist(storageLevel)
+            if (1 % checkpointEvery == 0) {  // iter is effectively 1 here
+              MatrixInternals.maybeCheckpoint(x.blocks, config.useCheckpoints)
+              x.blocks.count()
+            }
+            oldX.blocks.unpersist(true)
+            extraPowers.foreach(_.blocks.unpersist(true))
+          }
+
+          residualNew.blocks.unpersist(true)
+          axNew.blocks.unpersist(true)
+
+          // Continue to next iteration
+          lastMetric = metricNew
+
+        } else {
+          // Alpha didn't change, proceed normally
+          lastMetric = metric
+          if (metric < config.tolerance) {
+            converged = true
+          }
+
+          if (!converged) {
+            val (correction, extraPowers) = buildHyperpowerCorrection(
+              eye, residual, order, midSplits, storageLevel)
+            val xNew = x.multiply(correction, midSplits)
+            val oldX = x
+            x = xNew
+            x.blocks.persist(storageLevel)
+            if (iter % checkpointEvery == 0) {
+              MatrixInternals.maybeCheckpoint(x.blocks, config.useCheckpoints)
+              x.blocks.count()
+            }
+            oldX.blocks.unpersist(true)
+            extraPowers.foreach(_.blocks.unpersist(true))
+          }
+
+          residual.blocks.unpersist(true)
+          ax.blocks.unpersist(true)
+        }
+      } else {
+        // Normal iteration (not first-iteration adaptive refinement)
+        lastMetric = metric
+        if (metric < config.tolerance) {
+          converged = true
+        }
+
+        if (!converged) {
+          val (correction, extraPowers) = buildHyperpowerCorrection(
+            eye, residual, order, midSplits, storageLevel)
+          val xNew = x.multiply(correction, midSplits)
+          val oldX = x
+          x = xNew
+          x.blocks.persist(storageLevel)
+          if (iter % checkpointEvery == 0) {
+            MatrixInternals.maybeCheckpoint(x.blocks, config.useCheckpoints)
+            x.blocks.count()
+          }
+          oldX.blocks.unpersist(true)
+          extraPowers.foreach(_.blocks.unpersist(true))
+        }
+
+        residual.blocks.unpersist(true)
+        ax.blocks.unpersist(true)
+      }
     }
 
     if (!converged) {
       logger.warn("{} did not converge after {} iterations. Last metric: {}",
-        algorithmName, config.maxIter, previousMetric)
+        algorithmName, config.maxIter, lastMetric)
     }
 
     if (shouldPersistInput) {

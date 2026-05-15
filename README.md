@@ -55,26 +55,44 @@ val inverse = blockMatrix.inverse(
 ### Iterative Inversion
 
 ```scala
-import sparkinverse.api.IterativeInverseConfig
+import sparkinverse.api.{IterativeInverseConfig, AlphaStrategy}
 
-val inverse = blockMatrix.iterativeInverse(
-  IterativeInverseConfig(
-    order = 2,
-    maxIter = 30,
-    tolerance = 1e-10,
-    checkpointEvery = 5
-  )
-)
+// Default: Frobenius alpha + order-2 Newton-Schulz
+val inverse = blockMatrix.iterativeInverse()
 
+// Third-order Newton-Schulz with conservative adaptive alpha
 val cubicInverse = blockMatrix.iterativeInverse(
   IterativeInverseConfig(
     order = 3,
     maxIter = 20,
     tolerance = 1e-10,
-    checkpointEvery = 5
+    checkpointEvery = 5,
+    alphaStrategy = AlphaStrategy.Adaptive
   )
 )
 ```
+
+### Alpha Scaling Strategies
+
+The initial approximation X₀ = α·Aᵀ needs α ≤ 1/σ₁² to converge. The choice affects both convergence rate and Spark cost:
+
+```scala
+// Original: α = 1/(‖A‖₁ · ‖A‖_∞)
+// Cost: 2 shuffles + 2 actions (normOne + normInf)
+AlphaStrategy.NormProduct
+
+// New default: α = 1/‖A‖²_F — safe, simple, no shuffle
+AlphaStrategy.Frobenius
+
+// Best for ill-conditioned matrices: α = 1/σ₁² via power iteration
+// Cost: 2·N distributed matrix multiplies
+AlphaStrategy.PowerIteration(powerIterations = 3)
+
+// Experimental: start with Frobenius, conservatively shrink α from first residual
+AlphaStrategy.Adaptive
+```
+
+`Frobenius` is the recommended default for distributed execution because it is safe and avoids the row/column norm shuffles used by `NormProduct`. It is not universally tighter than `NormProduct`, but is often competitive at lower Spark cost. On ill-conditioned matrices (κ > 1000), `PowerIteration` can be worth its extra distributed multiplies because it directly estimates σ₁².
 
 ### Migration (Before -> After)
 
@@ -95,9 +113,9 @@ For `BlockMatrix` and `CoordinateMatrix`:
 - `localInverse`
 - `svdInverse`
 - `pseudoInverse(PseudoInverseSide.Left|Right)`
-- `normOne`
-- `normInf`
-- `frobeniusNormSquared`
+- `normOne` — ‖A‖₁ via column sums (1 shuffle)
+- `normInf` — ‖A‖\_∞ via row sums (1 shuffle)
+- `frobeniusNormSquared` — ‖A‖²_F, zero shuffle
 - `scalarMultiply`
 - `negate`
 
@@ -122,30 +140,45 @@ Additional distributed arithmetic helpers for `CoordinateMatrix`:
 
 ### IterativeInverseConfig
 
-- `order`
-- `maxIter`
-- `tolerance`
-- `useCheckpoints`
-- `checkpointEvery`
-- `midSplits`
-- `persistLevel`
+| Field             | Type            | Default               | Description                               |
+| ----------------- | --------------- | --------------------- | ----------------------------------------- |
+| `order`           | `Int`           | `2`                   | Newton-Schulz hyperpower order (2–10)     |
+| `maxIter`         | `Int`           | `30`                  | Maximum iterations                        |
+| `tolerance`       | `Double`        | `1e-15`               | Convergence threshold on `‖I - AX‖_F / n` |
+| `useCheckpoints`  | `Boolean`       | `true`                | Enable RDD checkpointing                  |
+| `checkpointEvery` | `Int`           | `5`                   | Checkpoint interval                       |
+| `midSplits`       | `Int`           | `1`                   | Multiplication parallelism hint           |
+| `persistLevel`    | `StorageLevel`  | `MEMORY_AND_DISK_SER` | Storage level for intermediates           |
+| `alphaStrategy`   | `AlphaStrategy` | `Frobenius`           | Initial scaling α computation             |
 
 ## Choosing An Algorithm
 
 - Use recursive inversion as the default general-purpose algorithm.
 - Use iterative inversion when the matrix is well-conditioned enough for Newton-Schulz to converge quickly.
 - Use `iterativeInverse(IterativeInverseConfig(order = 3, ...))` for cubic hyperpower when you want fewer iterations at the cost of more multiplies per step.
+- **Use `AlphaStrategy.Frobenius`** (default) for a safe zero-shuffle α computation.
+- **Use `AlphaStrategy.PowerIteration`** on ill-conditioned matrices (κ > 1000) where a precise σ₁² estimate is worth extra distributed multiplies.
+- **Use `AlphaStrategy.Adaptive`** only experimentally; it conservatively shrinks the Frobenius α after the first residual and is intended for stability, not guaranteed acceleration.
 - Use `localInverse` or `svdInverse` only for matrices small enough to collect to the driver.
 
 ## Benchmarks
 
-The benchmark app now lives in `bench`:
+Benchmark apps live in the `bench` module so normal `core/test` stays focused on correctness.
+
+General inversion benchmark:
 
 ```bash
 sbt bench/run
 ```
 
-The benchmark is intentionally simple: it runs a small fixed set of matrix sizes with a hand-picked config for Schur complement, third-order hyperpower iteration, fourth-order hyperpower iteration, and Newton-Schulz, and each timed section forces Spark execution before recording the result.
+Alpha strategy benchmark:
+
+```bash
+sbt "bench/runMain sparkinverse.benchmark.AlphaStrategyBenchmark"
+sbt "bench/runMain sparkinverse.benchmark.AlphaStrategyBenchmark --sizes 100,500,1000 --orders 2,3"
+```
+
+The benchmark apps force Spark execution before recording timings. Large matrix cases (n ≥ 1000) can take minutes under `local[*]`; use a real Spark cluster for meaningful shuffle/I/O measurements.
 
 ## Tests
 
