@@ -1233,6 +1233,53 @@ val predictions = X.multiply(B_normalized, midSplits = 4)
 
 ---
 
+## 15. CANS / Chebyshev-Optimal Polynomial Style
+
+**Priority:** 🟡 Research / future work  
+**Effort:** High  
+**Files:** `core/src/main/scala/sparkinverse/api/Configs.scala`, `core/src/main/scala/sparkinverse/block/BlockMatrixOps.scala`, tests  
+**Tag:** **[local]** — coefficient correctness and iteration count are locally measurable; cluster benchmarking still needed for wall-clock impact
+
+### Problem
+
+A preliminary `PolynomialStyle.CANS` API was removed because it was only an alias for the standard hyperpower correction while documentation implied Chebyshev/CANS-optimal coefficients were implemented. Reintroducing this must wait until the math is implemented and validated.
+
+### Required work before reintroducing
+
+1. Derive the correct minimax polynomial for the **matrix inverse correction** form used here:
+
+   ```text
+   X_{k+1} = X_k · p(R_k),   R_k = I - A X_k
+   ```
+
+   Do not directly transplant CANS formulas for polar decomposition unless the transformation to inverse iteration is proven.
+
+2. Define a public API only after the coefficients are real, e.g.:
+
+   ```scala
+   sealed trait PolynomialStyle
+   object PolynomialStyle {
+     case object Binomial extends PolynomialStyle
+     case object ChebyshevMinimax extends PolynomialStyle
+   }
+   ```
+
+3. Implement coefficient construction for at least `order = 3`, with explicit fallback or rejection for unsupported orders.
+
+4. Add focused tests:
+   - coefficient values for known intervals
+   - equality with Binomial only when mathematically expected
+   - iteration count improvement on a small matrix where minimax coefficients should help
+   - no misleading no-op behavior
+
+5. Update README only after implementation is complete. Documentation must say exactly which orders and assumptions are supported.
+
+### Non-goal for current branch
+
+Do **not** expose a placeholder `CANS` or `PolynomialStyle` API that behaves exactly like Binomial. That is misleading for users and hard to validate.
+
+---
+
 ## Benchmarking Mandate
 
 Every improvement implemented from this TODO list **must** be followed by:
@@ -1278,3 +1325,5 @@ Add a one-line tag to the TODO item:
 | 11  | Tolerance-based early exit         | **[local]**   | Iteration count measurable locally           |
 | 12  | Pseudo-inverse regularization      | **[local]**   | Correctness + convergence visible locally    |
 | 13  | Dead code `previousMetric`         | **[local]**   | Code cleanup only                            |
+| 14  | EASE recommender example job       | **[both]**    | Correctness: local. End-to-end time: cluster |
+| 15  | CANS / Chebyshev polynomial style  | **[local]**   | Coefficients + iteration count locally       |

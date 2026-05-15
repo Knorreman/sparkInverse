@@ -5,7 +5,7 @@ import org.apache.spark.mllib.linalg.{DenseMatrix, Matrix}
 import org.apache.spark.mllib.linalg.distributed.{BlockMatrix, CoordinateMatrix, MatrixEntry}
 import org.apache.spark.{SparkConf, SparkContext}
 import org.scalatest.funsuite.AnyFunSuite
-import sparkinverse.api.{AlphaStrategy, IterativeInverseConfig, PolynomialStyle, PseudoInverseSide, RecursiveInverseConfig}
+import sparkinverse.api.{AlphaStrategy, IterativeInverseConfig, PseudoInverseSide, RecursiveInverseConfig}
 import sparkinverse.block.BlockMatrixOps
 import sparkinverse.core.MatrixInternals
 import sparkinverse.coordinate.CoordinateMatrixOps
@@ -617,13 +617,10 @@ class TestInverse extends AnyFunSuite {
     assert(testMatrixSimilarity(inverse.toLocalMatrix(), expected, 1e-8))
   }
 
-  test("Frobenius alpha converges faster or equal to NormProduct") {
-    // For a well-conditioned matrix, both should converge, but Frobenius should
-    // use fewer iterations because 1/||A||²_F ≥ 1/(||A||₁·||A||_∞)
+  test("Frobenius and NormProduct alpha strategies both converge") {
     val matrix = diagonallyDominantBlockMatrix()
     val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
 
-    // Both should converge, Frobenius may converge in fewer iterations
     val configFrob = IterativeInverseConfig(
       order = 2, maxIter = 30, tolerance = 1e-10, useCheckpoints = false,
       midSplits = 1, alphaStrategy = AlphaStrategy.Frobenius)
@@ -660,106 +657,45 @@ class TestInverse extends AnyFunSuite {
     }
   }
 
-  // ── CANS polynomial style tests ─────────────────────────────────────────────
-
-  test("CANS polynomial style converges for order 3") {
-    val matrix = diagonallyDominantBlockMatrix()
-    val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
-
-    val config = IterativeInverseConfig(
-      order = 3,
-      maxIter = 20,
-      tolerance = 1e-10,
-      useCheckpoints = false,
-      midSplits = 1,
-      alphaStrategy = AlphaStrategy.Frobenius,
-      polynomialStyle = PolynomialStyle.CANS
-    )
-    val inverse = matrix.iterativeInverse(config)
-    assert(testMatrixSimilarity(inverse.toLocalMatrix(), expected, 1e-6))
-  }
-
-  test("CANS polynomial style falls back to binomial for order 2") {
-    val matrix = diagonallyDominantBlockMatrix()
-    val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
-
+  test("PowerIteration alpha handles scaled identity with sigma greater than one") {
+    val matrix = identityBlockMatrix(4).scalarMultiply(10.0)
+    val expected = identityBlockMatrix(4).scalarMultiply(0.1)
     val config = IterativeInverseConfig(
       order = 2,
-      maxIter = 30,
+      maxIter = 2,
       tolerance = 1e-10,
       useCheckpoints = false,
-      midSplits = 1,
-      alphaStrategy = AlphaStrategy.Frobenius,
-      polynomialStyle = PolynomialStyle.CANS
+      alphaStrategy = AlphaStrategy.PowerIteration(powerIterations = 3)
     )
     val inverse = matrix.iterativeInverse(config)
-    assert(testMatrixSimilarity(inverse.toLocalMatrix(), expected, 1e-8))
+    assert(testMatrixSimilarity(inverse.toLocalMatrix(), expected.toLocalMatrix(), 1e-8))
   }
 
-  test("CANS polynomial style falls back to binomial for order 4") {
-    val matrix = diagonallyDominantBlockMatrix()
-    val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
-
+  test("PowerIteration alpha handles scaled identity with sigma less than one") {
+    val matrix = identityBlockMatrix(4).scalarMultiply(0.5)
+    val expected = identityBlockMatrix(4).scalarMultiply(2.0)
     val config = IterativeInverseConfig(
-      order = 4,
-      maxIter = 15,
+      order = 2,
+      maxIter = 2,
       tolerance = 1e-10,
       useCheckpoints = false,
-      midSplits = 1,
-      alphaStrategy = AlphaStrategy.Frobenius,
-      polynomialStyle = PolynomialStyle.CANS
+      alphaStrategy = AlphaStrategy.PowerIteration(powerIterations = 3)
     )
     val inverse = matrix.iterativeInverse(config)
-    // Should converge (using binomial fallback for order 4)
-    assert(testMatrixSimilarity(inverse.toLocalMatrix(), expected, 1e-6))
+    assert(testMatrixSimilarity(inverse.toLocalMatrix(), expected.toLocalMatrix(), 1e-8))
   }
 
-  test("CANS order 3 with Frobenius alpha converges on identity matrix") {
-    val identity = identityBlockMatrix(4)
+  test("PowerIteration rejects non-positive iteration counts") {
+    val matrix = identityBlockMatrix(4)
     val config = IterativeInverseConfig(
-      order = 3,
-      maxIter = 10,
-      tolerance = 1e-10,
+      order = 2,
+      maxIter = 2,
       useCheckpoints = false,
-      alphaStrategy = AlphaStrategy.Frobenius,
-      polynomialStyle = PolynomialStyle.CANS
+      alphaStrategy = AlphaStrategy.PowerIteration(powerIterations = 0)
     )
-    val inverse = identity.iterativeInverse(config)
-    assert(testMatrixSimilarity(inverse.toLocalMatrix(), identity.toLocalMatrix(), 1e-8))
-  }
-
-  test("CANS order 3 with Adaptive alpha converges") {
-    val matrix = diagonallyDominantBlockMatrix()
-    val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
-
-    val config = IterativeInverseConfig(
-      order = 3,
-      maxIter = 20,
-      tolerance = 1e-10,
-      useCheckpoints = false,
-      midSplits = 1,
-      alphaStrategy = AlphaStrategy.Adaptive,
-      polynomialStyle = PolynomialStyle.CANS
-    )
-    val inverse = matrix.iterativeInverse(config)
-    assert(testMatrixSimilarity(inverse.toLocalMatrix(), expected, 1e-6))
-  }
-
-  test("CANS with PowerIteration alpha converges") {
-    val matrix = diagonallyDominantBlockMatrix()
-    val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
-
-    val config = IterativeInverseConfig(
-      order = 3,
-      maxIter = 20,
-      tolerance = 1e-10,
-      useCheckpoints = false,
-      midSplits = 1,
-      alphaStrategy = AlphaStrategy.PowerIteration(powerIterations = 3),
-      polynomialStyle = PolynomialStyle.CANS
-    )
-    val inverse = matrix.iterativeInverse(config)
-    assert(testMatrixSimilarity(inverse.toLocalMatrix(), expected, 1e-6))
+    assertThrows[IllegalArgumentException] {
+      matrix.iterativeInverse(config).blocks.count()
+    }
   }
 
   test("default config still produces valid inverse (backward compatibility)") {

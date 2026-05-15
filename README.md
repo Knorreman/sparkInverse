@@ -55,20 +55,19 @@ val inverse = blockMatrix.inverse(
 ### Iterative Inversion
 
 ```scala
-import sparkinverse.api.{IterativeInverseConfig, AlphaStrategy, PolynomialStyle}
+import sparkinverse.api.{IterativeInverseConfig, AlphaStrategy}
 
-// Default: Frobenius alpha + binomial hyperpower, order 2
+// Default: Frobenius alpha + order-2 Newton-Schulz
 val inverse = blockMatrix.iterativeInverse()
 
-// Third-order Newton-Schulz with adaptive alpha
+// Third-order Newton-Schulz with conservative adaptive alpha
 val cubicInverse = blockMatrix.iterativeInverse(
   IterativeInverseConfig(
     order = 3,
     maxIter = 20,
     tolerance = 1e-10,
     checkpointEvery = 5,
-    alphaStrategy = AlphaStrategy.Adaptive,
-    polynomialStyle = PolynomialStyle.CANS
+    alphaStrategy = AlphaStrategy.Adaptive
   )
 )
 ```
@@ -82,29 +81,18 @@ The initial approximation X₀ = α·Aᵀ needs α ≤ 1/σ₁² to converge. Th
 // Cost: 2 shuffles + 2 actions (normOne + normInf)
 AlphaStrategy.NormProduct
 
-// New default: α = 1/‖A‖²_F — tighter bound, no shuffle
+// New default: α = 1/‖A‖²_F — safe, simple, no shuffle
 AlphaStrategy.Frobenius
 
 // Best for ill-conditioned matrices: α = 1/σ₁² via power iteration
 // Cost: 2·N distributed matrix multiplies
 AlphaStrategy.PowerIteration(powerIterations = 3)
 
-// Start with Frobenius, refine from first-iteration residual
+// Experimental: start with Frobenius, conservatively shrink α from first residual
 AlphaStrategy.Adaptive
 ```
 
-For well-conditioned matrices (κ < 100), `Frobenius` is the recommended default — it produces an equally tight initial α at zero shuffle cost. On ill-conditioned matrices (κ > 1000), `PowerIteration` can be the difference between convergence and divergence. `Adaptive` gives you the best of both at essentially Frobenius cost.
-
-### Polynomial Styles
-
-```scala
-// Classical hyperpower: C = I + R + R² + ... (default)
-PolynomialStyle.Binomial
-
-// CANS-style: same coefficients now, infrastructure for future
-// Chebyshev-optimal minimax coefficients on order 3
-PolynomialStyle.CANS
-```
+`Frobenius` is the recommended default for distributed execution because it is safe and avoids the row/column norm shuffles used by `NormProduct`. It is not universally tighter than `NormProduct`, but is often competitive at lower Spark cost. On ill-conditioned matrices (κ > 1000), `PowerIteration` can be worth its extra distributed multiplies because it directly estimates σ₁².
 
 ### Migration (Before -> After)
 
@@ -152,26 +140,25 @@ Additional distributed arithmetic helpers for `CoordinateMatrix`:
 
 ### IterativeInverseConfig
 
-| Field             | Type              | Default               | Description                               |
-| ----------------- | ----------------- | --------------------- | ----------------------------------------- |
-| `order`           | `Int`             | `2`                   | Newton-Schulz hyperpower order (2–10)     |
-| `maxIter`         | `Int`             | `30`                  | Maximum iterations                        |
-| `tolerance`       | `Double`          | `1e-15`               | Convergence threshold on `‖I - AX‖_F / n` |
-| `useCheckpoints`  | `Boolean`         | `true`                | Enable RDD checkpointing                  |
-| `checkpointEvery` | `Int`             | `5`                   | Checkpoint interval                       |
-| `midSplits`       | `Int`             | `1`                   | Multiplication parallelism hint           |
-| `persistLevel`    | `StorageLevel`    | `MEMORY_AND_DISK_SER` | Storage level for intermediates           |
-| `alphaStrategy`   | `AlphaStrategy`   | `Frobenius`           | Initial scaling α computation             |
-| `polynomialStyle` | `PolynomialStyle` | `Binomial`            | Correction polynomial coefficients        |
+| Field             | Type            | Default               | Description                               |
+| ----------------- | --------------- | --------------------- | ----------------------------------------- |
+| `order`           | `Int`           | `2`                   | Newton-Schulz hyperpower order (2–10)     |
+| `maxIter`         | `Int`           | `30`                  | Maximum iterations                        |
+| `tolerance`       | `Double`        | `1e-15`               | Convergence threshold on `‖I - AX‖_F / n` |
+| `useCheckpoints`  | `Boolean`       | `true`                | Enable RDD checkpointing                  |
+| `checkpointEvery` | `Int`           | `5`                   | Checkpoint interval                       |
+| `midSplits`       | `Int`           | `1`                   | Multiplication parallelism hint           |
+| `persistLevel`    | `StorageLevel`  | `MEMORY_AND_DISK_SER` | Storage level for intermediates           |
+| `alphaStrategy`   | `AlphaStrategy` | `Frobenius`           | Initial scaling α computation             |
 
 ## Choosing An Algorithm
 
 - Use recursive inversion as the default general-purpose algorithm.
 - Use iterative inversion when the matrix is well-conditioned enough for Newton-Schulz to converge quickly.
 - Use `iterativeInverse(IterativeInverseConfig(order = 3, ...))` for cubic hyperpower when you want fewer iterations at the cost of more multiplies per step.
-- **Use `AlphaStrategy.Frobenius`** (default) for the cheapest α computation — no shuffle, tighter bound than the legacy NormProduct.
-- **Use `AlphaStrategy.PowerIteration`** on ill-conditioned matrices (κ > 1000) where a precise α estimate is needed for convergence.
-- **Use `AlphaStrategy.Adaptive`** to get near-optimal α at Frobenius cost — refines α after the first iteration using the observed residual.
+- **Use `AlphaStrategy.Frobenius`** (default) for a safe zero-shuffle α computation.
+- **Use `AlphaStrategy.PowerIteration`** on ill-conditioned matrices (κ > 1000) where a precise σ₁² estimate is worth extra distributed multiplies.
+- **Use `AlphaStrategy.Adaptive`** only experimentally; it conservatively shrinks the Frobenius α after the first residual and is intended for stability, not guaranteed acceleration.
 - Use `localInverse` or `svdInverse` only for matrices small enough to collect to the driver.
 
 ## Benchmarks
