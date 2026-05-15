@@ -137,6 +137,7 @@ Additional distributed arithmetic helpers for `CoordinateMatrix`:
 - `targetOutputPartitions`: optional output coalesce target
 - `unionCoalesceThreshold`: no-shuffle coalesce trigger threshold
 - `minBlockSizeForPersistence`: skip persistence for tiny intermediates
+- `regularizationLambda`: Tikhonov regularization parameter for pseudo-inverse (default `0.0`)
 
 ### IterativeInverseConfig
 

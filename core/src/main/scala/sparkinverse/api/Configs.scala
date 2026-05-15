@@ -61,7 +61,14 @@ final case class RecursiveInverseConfig(
   useCheckpoints: Boolean = true,
   targetOutputPartitions: Option[Int] = None,
   unionCoalesceThreshold: Int = 8,
-  minBlockSizeForPersistence: Int = 1000000
+  minBlockSizeForPersistence: Int = 1000000,
+  /** Tikhonov regularization parameter for pseudo-inverse.
+    * When > 0, adds λI to the Gram matrix before inversion,
+    * improving numerical stability for ill-conditioned matrices.
+    * Only affects `pseudoInverse`, not `inverse`.
+    * Default 0.0 preserves standard Moore-Penrose behavior.
+    */
+  regularizationLambda: Double = 0.0
 )
 
 final case class IterativeInverseConfig(
