@@ -458,7 +458,24 @@ For Option B, add Breeze as a production dependency:
 
 ---
 
-## 5. A Caching in Iterative Loop
+## 5. A Caching in Iterative Loop — COMPLETED
+
+**Priority:** 🟢 Low  
+**Effort:** Low  
+**Files:** `core/src/main/scala/sparkinverse/block/BlockMatrixOps.scala`
+
+**Implementation:**
+
+- Added `matrix.blocks.count()` after `persist()` in `iterativeInverseInternal` to force cache materialization before the iterative loop starts
+- Input matrix A is now guaranteed cached before the first multiply
+- Skipped `pseudoInverse` — no loop, no repeated recomputation benefit
+
+**Validation:**
+
+- All 56 core tests pass
+- bench/compile passes
+
+---
 
 **Priority:** 🟢 Low  
 **Effort:** Low  

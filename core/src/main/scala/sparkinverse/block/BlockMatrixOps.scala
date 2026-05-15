@@ -719,6 +719,7 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     val shouldPersistInput = matrix.blocks.getStorageLevel == StorageLevel.NONE
     if (shouldPersistInput) {
       matrix.blocks.persist(storageLevel)
+      matrix.blocks.count()  // Force materialization before iterative loop starts
     }
 
     val n = matrix.numRows()
