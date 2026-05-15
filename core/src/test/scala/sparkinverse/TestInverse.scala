@@ -384,6 +384,67 @@ class TestInverse extends AnyFunSuite {
     assert(testMatrixSimilarity(inverse2.toLocalMatrix(), expected, 1e-10))
   }
 
+  test("iterative convergence check interval greater than one converges") {
+    val matrix = diagonallyDominantBlockMatrix()
+    val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
+
+    val config = IterativeInverseConfig(
+      order = 2,
+      maxIter = 30,
+      tolerance = 1e-10,
+      useCheckpoints = false,
+      midSplits = 1,
+      convergenceCheckInterval = 3
+    )
+    val inverse = matrix.iterativeInverse(config)
+    assert(testMatrixSimilarity(inverse.toLocalMatrix(), expected, 1e-8))
+  }
+
+  test("higher-order iterative convergence check interval converges") {
+    val matrix = diagonallyDominantBlockMatrix()
+    val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
+
+    val config = IterativeInverseConfig(
+      order = 4,
+      maxIter = 20,
+      tolerance = 1e-10,
+      useCheckpoints = false,
+      midSplits = 1,
+      convergenceCheckInterval = 2
+    )
+    val inverse = matrix.iterativeInverse(config)
+    assert(testMatrixSimilarity(inverse.toLocalMatrix(), expected, 1e-8))
+  }
+
+  test("adaptive alpha works with sparse convergence checks") {
+    val matrix = diagonallyDominantBlockMatrix()
+    val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
+
+    val config = IterativeInverseConfig(
+      order = 2,
+      maxIter = 30,
+      tolerance = 1e-10,
+      useCheckpoints = false,
+      midSplits = 1,
+      alphaStrategy = AlphaStrategy.Adaptive,
+      convergenceCheckInterval = 3
+    )
+    val inverse = matrix.iterativeInverse(config)
+    assert(testMatrixSimilarity(inverse.toLocalMatrix(), expected, 1e-8))
+  }
+
+  test("iterative inverse rejects non-positive convergence check interval") {
+    val matrix = identityBlockMatrix(4)
+    val config = IterativeInverseConfig(
+      maxIter = 2,
+      useCheckpoints = false,
+      convergenceCheckInterval = 0
+    )
+    assertThrows[IllegalArgumentException] {
+      matrix.iterativeInverse(config)
+    }
+  }
+
   test("coordinate matrix norms") {
     val entries = sc.parallelize(Seq(
       MatrixEntry(0, 0, 5.0), MatrixEntry(0, 1, 3.0),
@@ -851,6 +912,7 @@ class TestInverse extends AnyFunSuite {
     val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
 
     // Default IterativeInverseConfig should work exactly as before
+    assert(IterativeInverseConfig().convergenceCheckInterval == 1)
     val config = IterativeInverseConfig(maxIter = 30, tolerance = 1e-10)
     val inverse = matrix.iterativeInverse(config)
     assert(testMatrixSimilarity(inverse.toLocalMatrix(), expected, 1e-8))

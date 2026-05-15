@@ -76,5 +76,10 @@ final case class IterativeInverseConfig(
   /** Strategy for computing the initial scaling α in X₀ = α·Aᵀ.
     * Default is Frobenius (1/‖A‖²_F), a safe zero-shuffle distributed default.
     */
-  alphaStrategy: AlphaStrategy = AlphaStrategy.Frobenius
+  alphaStrategy: AlphaStrategy = AlphaStrategy.Frobenius,
+
+  /** Check convergence every N iterations. Default 1 preserves the historical
+    * behavior of checking ‖I - A·X‖_F / n on every iteration.
+    */
+  convergenceCheckInterval: Int = 1
 )

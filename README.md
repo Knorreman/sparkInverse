@@ -140,16 +140,17 @@ Additional distributed arithmetic helpers for `CoordinateMatrix`:
 
 ### IterativeInverseConfig
 
-| Field             | Type            | Default               | Description                               |
-| ----------------- | --------------- | --------------------- | ----------------------------------------- |
-| `order`           | `Int`           | `2`                   | Newton-Schulz hyperpower order (2–10)     |
-| `maxIter`         | `Int`           | `30`                  | Maximum iterations                        |
-| `tolerance`       | `Double`        | `1e-15`               | Convergence threshold on `‖I - AX‖_F / n` |
-| `useCheckpoints`  | `Boolean`       | `true`                | Enable RDD checkpointing                  |
-| `checkpointEvery` | `Int`           | `5`                   | Checkpoint interval                       |
-| `midSplits`       | `Int`           | `1`                   | Multiplication parallelism hint           |
-| `persistLevel`    | `StorageLevel`  | `MEMORY_AND_DISK_SER` | Storage level for intermediates           |
-| `alphaStrategy`   | `AlphaStrategy` | `Frobenius`           | Initial scaling α computation             |
+| Field                      | Type            | Default               | Description                               |
+| -------------------------- | --------------- | --------------------- | ----------------------------------------- |
+| `order`                    | `Int`           | `2`                   | Newton-Schulz hyperpower order (2–10)     |
+| `maxIter`                  | `Int`           | `30`                  | Maximum iterations                        |
+| `tolerance`                | `Double`        | `1e-15`               | Convergence threshold on `‖I - AX‖_F / n` |
+| `useCheckpoints`           | `Boolean`       | `true`                | Enable RDD checkpointing                  |
+| `checkpointEvery`          | `Int`           | `5`                   | Checkpoint interval                       |
+| `midSplits`                | `Int`           | `1`                   | Multiplication parallelism hint           |
+| `persistLevel`             | `StorageLevel`  | `MEMORY_AND_DISK_SER` | Storage level for intermediates           |
+| `alphaStrategy`            | `AlphaStrategy` | `Frobenius`           | Initial scaling α computation             |
+| `convergenceCheckInterval` | `Int`           | `1`                   | Check `‖I - AX‖_F / n` every N iterations |
 
 ## Choosing An Algorithm
 
