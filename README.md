@@ -79,7 +79,7 @@ The initial approximation X₀ = α·Aᵀ needs α ≤ 1/σ₁² to converge. Th
 
 ```scala
 // Original: α = 1/(‖A‖₁ · ‖A‖_∞)
-// Cost: 1 shuffle + 1 action (via fused normOneAndNormInf)
+// Cost: 2 shuffles + 2 actions (normOne + normInf)
 AlphaStrategy.NormProduct
 
 // New default: α = 1/‖A‖²_F — tighter bound, no shuffle
@@ -125,9 +125,8 @@ For `BlockMatrix` and `CoordinateMatrix`:
 - `localInverse`
 - `svdInverse`
 - `pseudoInverse(PseudoInverseSide.Left|Right)`
-- `normOne` — ‖A‖₁ via column sums
-- `normInf` — ‖A‖\_∞ via row sums
-- `normOneAndNormInf` — fused: both norms in 1 shuffle + 1 action
+- `normOne` — ‖A‖₁ via column sums (1 shuffle)
+- `normInf` — ‖A‖\_∞ via row sums (1 shuffle)
 - `frobeniusNormSquared` — ‖A‖²_F, zero shuffle
 - `scalarMultiply`
 - `negate`
@@ -177,13 +176,22 @@ Additional distributed arithmetic helpers for `CoordinateMatrix`:
 
 ## Benchmarks
 
-The benchmark app now lives in `bench`:
+Benchmark apps live in the `bench` module so normal `core/test` stays focused on correctness.
+
+General inversion benchmark:
 
 ```bash
 sbt bench/run
 ```
 
-The benchmark is intentionally simple: it runs a small fixed set of matrix sizes with a hand-picked config for Schur complement, third-order hyperpower iteration, fourth-order hyperpower iteration, and Newton-Schulz, and each timed section forces Spark execution before recording the result.
+Alpha strategy benchmark:
+
+```bash
+sbt "bench/runMain sparkinverse.benchmark.AlphaStrategyBenchmark"
+sbt "bench/runMain sparkinverse.benchmark.AlphaStrategyBenchmark --sizes 100,500,1000 --orders 2,3"
+```
+
+The benchmark apps force Spark execution before recording timings. Large matrix cases (n ≥ 1000) can take minutes under `local[*]`; use a real Spark cluster for meaningful shuffle/I/O measurements.
 
 ## Tests
 

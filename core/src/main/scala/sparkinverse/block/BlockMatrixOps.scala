@@ -252,31 +252,41 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     bm
   }
 
-  /** Compute both ‖A‖₁ and ‖A‖_∞ in a single Spark pass.
-    * Emits (Left(rowIdx), rowSum) and (Right(colIdx), colSum) pairs
-    * from each block, then reduces them together before extracting
-    * the two max values.
-    * Cost: 1 shuffle + 1 action (vs 2 shuffles + 2 actions for separate calls).
+  /** Compute ‖A‖₁, the maximum absolute column sum.
+    * Cost: 1 shuffle + 1 distributed max action.
     */
-  /** Compute both ‖A‖₁ and ‖A‖_∞ in a single distributed pass.
-    *
-    * Each block emits its row sums (tagged Left) and column sums (tagged
-    * Right). A single reduceByKey(_ + _) merges across matching row/column
-    * indices, then collect() brings all (nRows + nCols) aggregates to the
-    * driver where we scan for the two maxima.
-    *
-    * Cost: 1 shuffle + 1 action (collect).  Same as frobeniusNormSquared().
-    * Previous NormProduct called normOne() + normInf() separately:
-    * cost was 2 shuffles + 2 actions.
-    */
-  def normOneAndNormInf(): (Double, Double) = {
-    val rpb = matrix.rowsPerBlock
+  def normOne(): Double = {
     val cpb = matrix.colsPerBlock
-    val collected = matrix.blocks.flatMap { case ((i, j), mat) =>
+    matrix.blocks.flatMap { case ((_, j), mat) =>
       val arr = mat.toArray
       val nRows = mat.numRows
       val nCols = mat.numCols
-      val results = Array.newBuilder[(Either[Int, Int], Double)]
+      val results = new Array[(Int, Double)](nCols)
+      var c = 0
+      while (c < nCols) {
+        var colSum = 0.0
+        var r = 0
+        while (r < nRows) {
+          colSum += math.abs(arr(r + c * nRows))
+          r += 1
+        }
+        results(c) = (j * cpb + c, colSum)
+        c += 1
+      }
+      results.iterator
+    }.reduceByKey(_ + _).values.max()
+  }
+
+  /** Compute ‖A‖∞, the maximum absolute row sum.
+    * Cost: 1 shuffle + 1 distributed max action.
+    */
+  def normInf(): Double = {
+    val rpb = matrix.rowsPerBlock
+    matrix.blocks.flatMap { case ((i, _), mat) =>
+      val arr = mat.toArray
+      val nRows = mat.numRows
+      val nCols = mat.numCols
+      val results = new Array[(Int, Double)](nRows)
       var r = 0
       while (r < nRows) {
         var rowSum = 0.0
@@ -285,38 +295,12 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
           rowSum += math.abs(arr(r + c * nRows))
           c += 1
         }
-        results += Left(i * rpb + r) -> rowSum
+        results(r) = (i * rpb + r, rowSum)
         r += 1
       }
-      var col = 0
-      while (col < nCols) {
-        var colSum = 0.0
-        var r = 0
-        while (r < nRows) {
-          colSum += math.abs(arr(r + col * nRows))
-          r += 1
-        }
-        results += Right(j * cpb + col) -> colSum
-        col += 1
-      }
-      results.result().iterator
-    }.reduceByKey(_ + _).collect()
-    var norm1  = Double.MinValue   // column-max → ‖A‖₁
-    var normInf = Double.MinValue  // row-max    → ‖A‖_∞
-    var k = 0
-    while (k < collected.length) {
-      collected(k) match {
-        case (Left(_),  v) => if (v > normInf) normInf = v
-        case (Right(_), v) => if (v > norm1)   norm1   = v
-      }
-      k += 1
-    }
-    (norm1, normInf)
+      results.iterator
+    }.reduceByKey(_ + _).values.max()
   }
-
-  def normOne(): Double = normOneAndNormInf()._1
-
-  def normInf(): Double = normOneAndNormInf()._2
 
   def frobeniusNormSquared(): Double = {
     matrix.blocks.map { case (_, mat) =>
@@ -505,9 +489,9 @@ final class BlockMatrixOps private[sparkinverse] (val matrix: BlockMatrix) {
     config.alphaStrategy match {
       case AlphaStrategy.NormProduct =>
         // Original strategy: α = 1/(‖A‖₁ · ‖A‖_∞)
-        // Cost: 1 shuffle + 1 collect (via normOneAndNormInf())
-        //       vs 2 shuffles + 2 actions when normOne() and normInf() were separate.
-        val (norm1, normInfValue) = normOneAndNormInf()
+        // Cost: 2 shuffles + 2 actions (one per norm)
+        val norm1 = normOne()
+        val normInfValue = normInf()
         val alpha = 1.0 / (norm1 * normInfValue)
         logger.info("Alpha strategy=NormProduct: ||A||_1={}, ||A||_inf={}, alpha={}",
           norm1, normInfValue, alpha)
