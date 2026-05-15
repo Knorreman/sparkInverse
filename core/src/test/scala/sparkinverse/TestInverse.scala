@@ -526,6 +526,25 @@ class TestInverse extends AnyFunSuite {
     assert(testMatrixSimilarity(product.toLocalMatrix(), identityBlockMatrix(n).toLocalMatrix(), 1e-6))
   }
 
+  test("recursive inverse handles odd block-grid quadrant split") {
+    // 6x6 with blockSize=2 gives a 3x3 block grid. The first split is uneven
+    // (m = 2), so F/G/H index normalization must handle odd grid dimensions.
+    val n = 6
+    val matrix = recursiveTestBlockMatrix(n, blockSize = 2)
+    val config = RecursiveInverseConfig(
+      limit = 2,
+      midSplits = 2,
+      useCheckpoints = false,
+      minBlockSizeForPersistence = 0
+    )
+
+    val inverse = matrix.inverse(config)
+    assert(inverse.blocks.count() > 0)
+
+    val product = matrix.multiply(inverse, 2)
+    assert(testMatrixSimilarity(product.toLocalMatrix(), identityBlockMatrix(n).toLocalMatrix(), 1e-6))
+  }
+
   test("coordinate recursive inversion") {
     val matrix = diagonallyDominantCoordinateMatrix()
     val expected = breezeToDenseMatrix(BINV(denseMatrixToBreeze(matrix)))
